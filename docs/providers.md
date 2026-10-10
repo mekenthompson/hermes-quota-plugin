@@ -17,7 +17,7 @@
 | `cursor` | `cursor-agent` login (macOS keychain or `auth.json`) | Read-only credential use; Included and API billing-cycle percents; personal on-demand cap as a window, personal/team pools as details. If the session expires, run `cursor-agent login`; the plugin never exchanges refresh tokens or writes to Cursor's credential store. |
 | `minimax` | Subscription Key **or** OAuth (`minimax-oauth`) | Token Plan 5h + Weekly windows per model; pay-as-you-go keys show `no-subscription`. The `video` model bucket is **opt-in** (default off — low tiers don't include video, so the entry reports a meaningless 100%). Enable with `hermes config set plugins.entries.quota.settings.minimaxVideoEnabled true` or `HERMES_QUOTA_MINIMAX_VIDEO_ENABLED=1`. |
 | `ollama` | `OLLAMA_API_KEY` (`sk-…`, from ollama.com/settings) | Ollama Cloud, from `GET /api/usage` (spend, per-model request counts) and `POST /api/me` (plan label, signup date). The **Monthly** bar is the server-reported usage fraction. The reset is the next monthly anniversary of `CreatedAt`, matching Ollama's documented "resets monthly on the same day of the month your plan started"; the day is derived because no endpoint returns a reset timestamp. **No balance value** — Ollama exposes none; see below. |
-| `grok` | browser cookies | **Opt-in**, disabled by default. The xAI API exposes no plan or account name, so the card shows neither. |
+| `grok` | Hermes `xai-oauth`, then opt-in browser cookies | Subscription window is `creditUsagePercent` only. Prepaid balance and on-demand usage are separate details, never the quota percentage. |
 
 Each fetcher is **fail-open**: a broken provider shows `unavailable (<reason>)`
 and never blocks the rest.
@@ -154,17 +154,29 @@ or User-Agent, so the fetcher retries before reporting the provider unavailable.
 
 With one key, the windows are labelled plainly (`5-hour`, `Weekly`, `Monthly`). With several keys, each window carries its slot as `key N` so the rows stay distinguishable; environment variables are not treated as account identities.
 
-### Grok (opt-in)
+### Grok
 
-Grok is the only provider read from your browser — there is no clean API path
-right now — so it is **disabled by default**:
+Grok subscription quota is read from the Hermes `xai-oauth` login. The request
+is `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits` with that
+access token. This is the Grok CLI billing surface, not the public xAI
+Management API and not an `xai` API key. The plugin does not refresh or write
+the token.
+
+The quota bar is `creditUsagePercent` against the included allowance. If that
+field is missing, usage is unavailable. On-demand usage and prepaid balance are
+never converted into the percentage. A zero prepaid balance is shown as `$0`;
+a non-zero money field stays in raw units because the unit is not a stable
+public contract.
+
+Browser cookies remain a last resort, and only when OAuth is missing or
+rejected and you opt in:
 
 ```bash
 hermes config set plugins.entries.quota.settings.grokEnabled true
 hermes quota refresh
 ```
 
-When off, Grok reports `opt-in-disabled`: no cookies are read, no files written.
+When that opt-in is off, no cookies are read. A missing OAuth token then reports `no-credentials`.
 Cookie sources, in order:
 
 1. `~/grok_session.json` if you created one yourself

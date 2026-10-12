@@ -388,6 +388,28 @@ def _product_name(value: Any) -> str:
     return " ".join("".join(spaced).split()).title() or "Unknown product"
 
 
+def _known_expired(token: str) -> bool:
+    """Use JWT expiry only to discard stale snapshots, never to authenticate.
+
+    Opaque, malformed or missing-exp tokens remain vendor-validated.
+    """
+    import base64
+    import math
+    import time
+
+    try:
+        parts = token.split(".")
+        if len(parts) != 3 or len(parts[1]) > 16384:
+            return False
+        payload = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
+        expiry = payload.get("exp") if isinstance(payload, dict) else None
+        if isinstance(expiry, bool) or not isinstance(expiry, (int, float)):
+            return False
+        return math.isfinite(expiry) and expiry <= time.time()
+    except (ValueError, UnicodeError, OverflowError):
+        return False
+
+
 def _saved_xai_tokens() -> list[str]:
     """Snapshot saved xai-oauth access tokens. Never refresh, select, or write."""
     try:
@@ -399,6 +421,8 @@ def _saved_xai_tokens() -> list[str]:
         if home not in homes:
             homes.append(home)
     found: list[str] = []
+    legacy: list[str] = []
+    pooled: list[str] = []
     for home in homes:
         try:
             store = json.loads((home / "auth.json").read_text(encoding="utf-8-sig"))
@@ -412,6 +436,7 @@ def _saved_xai_tokens() -> list[str]:
         access = tokens.get("access_token") if isinstance(tokens, dict) else None
         if isinstance(access, str) and access.strip():
             found.append(access.strip())
+            legacy.append(access.strip())
         pool = store.get("credential_pool") if isinstance(store.get("credential_pool"), dict) else {}
         rows = pool.get("xai-oauth") if isinstance(pool, dict) else None
         for row in rows if isinstance(rows, list) else ():
@@ -420,9 +445,16 @@ def _saved_xai_tokens() -> list[str]:
             access = row.get("access_token")
             if isinstance(access, str) and access.strip():
                 found.append(access.strip())
+                pooled.append(access.strip())
+    # The legacy provider field may retain an old snapshot after pool rotation.
+    # It is not evidence of another account. Preserve explicitly saved pool
+    # entries (even failing ones), and keep legacy-only failures visible.
+    stale_legacy = {
+        token for token in legacy if token not in pooled and _known_expired(token)
+    } if any(not _known_expired(token) for token in pooled) else set()
     unique: list[str] = []
     for token in found:
-        if token not in unique:
+        if token not in unique and token not in stale_legacy:
             unique.append(token)
     return unique[:_MAX_OAUTH_ACCOUNTS]
 

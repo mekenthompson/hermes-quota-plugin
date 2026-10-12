@@ -4,6 +4,7 @@ on:
   push:
     branches: [master]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   python-tests:
@@ -20,12 +21,28 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Install test-only safety dependencies
+        run: python -m pip install -r tests/requirements-ci.txt
+
       - name: Byte-compile all backend sources
         run: python -m py_compile __init__.py commands.py quota_cache.py quota_providers/*.py
 
       - name: Run offline unit tests
         run: |
           python -m unittest discover -s tests -p "test_*.py" -v
+          python - <<'PY'
+          import sys, unittest
+          sys.path.insert(0, "tests")
+          names = [
+              "test_fetchers.OpenAICodexFetcherTests.test_native_httpx_keeps_redirects_disabled_and_accounts_independent",
+              "test_browser_cookies.ChromeDecryptTests.test_rejects_v20_prefix",
+              "test_browser_cookies.ChromeLoaderTests.test_permission_error_is_tcc_denied",
+              "test_browser_cookies.ChromeLoaderTests.test_v20_blob_is_app_bound",
+          ]
+          result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromNames(names))
+          if not result.wasSuccessful() or result.skipped or result.testsRun != len(names):
+              sys.exit("Applicable safety tests must execute successfully with zero skips")
+          PY
         env:
           PYTHONPATH: ${{ github.workspace }}
 

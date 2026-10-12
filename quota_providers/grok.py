@@ -410,6 +410,16 @@ def _known_expired(token: str) -> bool:
         return False
 
 
+def _stale_duplicate(token: str, alternatives: list[str]) -> bool:
+    """Expiry alone cannot prove two credentials represent the same account."""
+    from .history_identity import identity_hint
+    hint = identity_hint("grok", token)
+    return bool(hint and _known_expired(token) and any(
+        not _known_expired(other) and identity_hint("grok", other) == hint
+        for other in alternatives
+    ))
+
+
 def _saved_xai_tokens() -> list[str]:
     """Snapshot saved xai-oauth access tokens. Never refresh, select, or write."""
     try:
@@ -450,8 +460,8 @@ def _saved_xai_tokens() -> list[str]:
     # It is not evidence of another account. Preserve explicitly saved pool
     # entries (even failing ones), and keep legacy-only failures visible.
     stale_legacy = {
-        token for token in legacy if token not in pooled and _known_expired(token)
-    } if any(not _known_expired(token) for token in pooled) else set()
+        token for token in legacy if token not in pooled and _stale_duplicate(token, pooled)
+    }
     unique: list[str] = []
     for token in found:
         if token not in unique and token not in stale_legacy:
@@ -462,21 +472,25 @@ def _saved_xai_tokens() -> list[str]:
 def _oauth_tokens() -> list[str]:
     """Hermes-owned xai-oauth tokens, read-only. Unexpected resolver errors do not peek another account."""
     tokens: list[str] = []
+    saved = _saved_xai_tokens()
     try:
         from hermes_cli.auth import AuthError
         from hermes_cli.auth_xai import resolve_xai_oauth_runtime_credentials
     except Exception:
-        return _saved_xai_tokens()
+        return saved
     try:
         creds = resolve_xai_oauth_runtime_credentials(refresh_if_expiring=False)
         token = str((creds or {}).get("api_key") or "").strip()
-        if token:
+        # Some core versions resolve the old provider snapshot before the pool.
+        # Do not put that expired snapshot back after the saved-token scan
+        # excluded it. Explicit saved entries and resolver-only failure remain.
+        if token and (token in saved or not _stale_duplicate(token, saved)):
             tokens.append(token)
     except AuthError:
         pass
     except Exception:
         return []
-    for token in _saved_xai_tokens():
+    for token in saved:
         if token not in tokens:
             tokens.append(token)
         if len(tokens) >= _MAX_OAUTH_ACCOUNTS:
@@ -575,7 +589,10 @@ def _fetch_grok_oauth() -> QuotaResult:
         if time.monotonic() >= deadline:
             results.append(build_unavailable("grok", "timeout"))
             break
-        results.append(_oauth_account(token, index))
+        item = _oauth_account(token, index)
+        from .history_identity import identity_hint
+        item.history_id = identity_hint("grok", token)
+        results.append(item)
     chosen = next((item for item in results if item.has_data()), results[0])
     extras = [item for item in results if item is not chosen]
     if extras:
@@ -588,6 +605,7 @@ def _fetch_grok_oauth() -> QuotaResult:
                 plan=item.plan,
                 unavailable_reason=item.unavailable_reason,
                 details=list(item.details),
+                history_id=item.history_id,
             ))
         chosen.accounts = accounts
     return chosen

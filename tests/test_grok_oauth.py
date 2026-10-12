@@ -48,8 +48,8 @@ class _Response:
 
 class GrokOAuthTests(unittest.TestCase):
     def test_expired_legacy_snapshot_does_not_become_a_second_account(self):
-        def jwt(exp):
-            payload = base64.urlsafe_b64encode(json.dumps({"exp": exp}).encode()).decode().rstrip("=")
+        def jwt(exp, subject="synthetic-shared"):
+            payload = base64.urlsafe_b64encode(json.dumps({"exp": exp, "sub": subject}).encode()).decode().rstrip("=")
             return f"header.{payload}.signature"
 
         live, expired = jwt(200), jwt(50)
@@ -76,8 +76,8 @@ class GrokOAuthTests(unittest.TestCase):
             self.assertEqual(auth.read_bytes(), before)
 
     def test_saved_pool_entries_and_legacy_only_failures_stay_visible(self):
-        def jwt(exp):
-            payload = base64.urlsafe_b64encode(json.dumps({"exp": exp}).encode()).decode().rstrip("=")
+        def jwt(exp, subject="synthetic-shared"):
+            payload = base64.urlsafe_b64encode(json.dumps({"exp": exp, "sub": subject}).encode()).decode().rstrip("=")
             return f"header.{payload}.signature"
 
         live, expired = jwt(200), jwt(50)
@@ -86,7 +86,8 @@ class GrokOAuthTests(unittest.TestCase):
             (live, [live], [live]),
             (live, ["opaque-account"], [live, "opaque-account"]),
             (expired, [expired, live], [expired, live]),
-            (expired, ["opaque-account"], ["opaque-account"]),
+            (expired, ["opaque-account"], [expired, "opaque-account"]),
+            (jwt(50, "distinct-subject"), [live], [jwt(50, "distinct-subject"), live]),
             ("malformed.jwt.value", [live], ["malformed.jwt.value", live]),
         ]
         for legacy, pool, expected in cases:
@@ -112,6 +113,25 @@ class GrokOAuthTests(unittest.TestCase):
             encoded = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
             with self.subTest(payload=payload):
                 self.assertFalse(grok._known_expired(f"header.{encoded}.signature"))
+
+    def test_resolver_cannot_reintroduce_expired_snapshot(self):
+        def jwt(exp, subject="synthetic-shared"):
+            payload = base64.urlsafe_b64encode(json.dumps({"exp": exp, "sub": subject}).encode()).decode().rstrip("=")
+            return f"header.{payload}.signature"
+
+        live, expired = jwt(200), jwt(50)
+        auth = types.ModuleType("hermes_cli.auth")
+        setattr(auth, "AuthError", type("AuthError", (Exception,), {}))
+        xai = types.ModuleType("hermes_cli.auth_xai")
+        resolver = mock.Mock(return_value={"api_key": expired})
+        setattr(xai, "resolve_xai_oauth_runtime_credentials", resolver)
+        parent = types.ModuleType("hermes_cli")
+        with mock.patch.dict("sys.modules", {
+            "hermes_cli": parent, "hermes_cli.auth": auth, "hermes_cli.auth_xai": xai,
+        }), mock.patch.object(grok, "_saved_xai_tokens", return_value=[live]), \
+             mock.patch("time.time", return_value=100):
+            self.assertEqual(grok._oauth_tokens(), [live])
+        resolver.assert_called_once_with(refresh_if_expiring=False)
 
     def test_subscription_percent_ignores_on_demand_and_prepaid(self):
         def opener(request, timeout):

@@ -94,6 +94,17 @@ def public_snapshot() -> dict[str, Any]:
     }
 
 
+@router.get("/history")
+def quota_history(days: int = 30) -> dict[str, Any]:
+    import importlib
+    from fastapi import HTTPException
+    history = importlib.import_module(_cache().__package__ + ".quota_history")
+    if not 1 <= days <= 90:
+        raise HTTPException(status_code=400, detail="history days must be between 1 and 90")
+    rows = history.read_history(days=days)
+    return {"samples": rows, "daily_changes": history.daily_changes(rows)}
+
+
 @router.get("/status")
 def quota_status() -> dict[str, Any]:
     return public_snapshot()

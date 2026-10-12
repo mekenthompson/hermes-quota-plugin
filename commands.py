@@ -244,6 +244,11 @@ def setup_argparse(subparser):
         action="store_true",
         help="Never refresh: emit the cache as-is (desktop widget poll path)",
     )
+    subs.add_parser("collect", help="Fetch and durably store a history sample (silent on success)")
+    hist = subs.add_parser("history", help="Read stored quota observations, not API daily totals")
+    hist.add_argument("--json", action="store_true")
+    hist.add_argument("--days", type=int, default=30)
+    hist.add_argument("--provider", default=None)
     subs.add_parser("refresh", help="Force a re-fetch of all providers")
     prov = subs.add_parser("provider", help="Show quota for one provider")
     prov.add_argument("name", help="provider id, e.g. anthropic, grok, openai-codex")
@@ -254,6 +259,20 @@ def setup_argparse(subparser):
 
 def _handle_cli(args):
     cmd = getattr(args, "quota_command", None) or "status"
+    if cmd == "collect":
+        from .quota_history import record_snapshot
+        record_snapshot(refresh_quota_cache())
+        return
+    if cmd == "history":
+        from .quota_history import read_history, daily_changes
+        rows = read_history(days=getattr(args, "days", 30), provider=getattr(args, "provider", None))
+        if getattr(args, "json", False):
+            print(json.dumps({"samples": rows, "daily_changes": daily_changes(rows)}, sort_keys=True))
+        else:
+            print(f"Quota history: {len(rows)} observations. Daily changes are sampled deltas, not API daily usage.")
+            for row in daily_changes(rows):
+                print(f"{row['day_utc']} UTC · {row['provider']} · {row['account'][:8]} · {row['window']}: {row['observed_percentage_points']:g} percentage points observed")
+        return
     if cmd == "refresh":
         refresh_quota_cache()
         print(_render_quota(None))

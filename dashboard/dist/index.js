@@ -57,6 +57,9 @@
     var state = React.useState({ loading: true, error: "", data: null });
     var snap = state[0];
     var setSnap = state[1];
+    var historyState = React.useState(null);
+    var hist = historyState[0];
+    var setHistory = historyState[1];
 
     function load(refresh) {
       setSnap(function (prev) { return { loading: true, error: "", data: prev.data }; });
@@ -68,7 +71,10 @@
       });
     }
 
-    React.useEffect(function () { load(false); }, []);
+    React.useEffect(function () {
+      load(false);
+      fetchJSON("/api/plugins/quota/history").then(setHistory).catch(function () { setHistory({ error: true }); });
+    }, []);
 
     var providers = snap.data && snap.data.providers ? snap.data.providers : {};
     var names = Object.keys(providers).sort(function (a, b) {
@@ -85,6 +91,16 @@
         "Bars are remaining subscription allowance. OpenRouter is a prepaid wallet, not a subscription. Tailnet only."
       ),
       snap.error ? h("p", null, snap.error) : null,
+      h("h2", { style: { fontSize: 16, marginTop: 20 } }, "Observed daily quota changes (UTC)"),
+      h("p", { style: { fontSize: 12 } }, "Sampled percentage-point changes, not vendor daily usage totals. Gaps, unknown identities and resets are not joined. No forecast yet."),
+      !hist ? h("p", null, "Loading history") : hist.error ? h("p", null, "History unavailable") :
+        h("div", null,
+          h("p", null, String((hist.samples || []).length) + " stored observations. Scheduled collection is configured separately; this page does not poll providers automatically."),
+          (hist.daily_changes || []).length ? hist.daily_changes.map(function (row, i) {
+            return h("div", { key: i, style: { fontSize: 13, marginBottom: 6 } },
+              row.day_utc + " · " + row.provider + " · " + row.account.slice(0, 8) + " · " + row.window + ": " + row.observed_percentage_points.toFixed(1) + " percentage points observed");
+          }) : h("p", null, "Insufficient comparable samples for a daily trend.")
+        ),
       names.map(function (name) { return h(Card, { key: name, record: providers[name] }); })
     );
   }

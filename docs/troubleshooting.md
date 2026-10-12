@@ -6,7 +6,7 @@
 | Old provider names or icons | The widget on the app machine is an older build than the backend | Update the widget copy there and reload desktop plugins; restart for backend changes |
 | Notice: *Widget vX · backend vY* | The two halves are different builds | Reload desktop plugins; restart the app if the backend is the older one |
 | *Update available* banner while `hermes plugins update` reports **already at catalog pin** | The install is Hermes-managed and pinned to the catalog entry's commit; the banner compares the installed build against the default branch | Update past the pin as described under [Updating](installation.md#updating), or wait for the catalog entry to advance |
-| `unavailable (opt-in-disabled)` for grok | Grok is opt-in | `hermes config set plugins.entries.quota.settings.grokEnabled true` |
+| `unavailable (opt-in-disabled)` for grok | Cookie fallback is off and OAuth was missing or rejected | Sign in with Hermes `xai-oauth`, or opt in to cookies with `hermes config set plugins.entries.quota.settings.grokEnabled true` |
 | `unavailable (config-invalid)` under an Anthropic account | A `claudeAccounts` entry is malformed (missing `id`/`configDir`, duplicate `id`, wrong type) | The row's detail line names the entry to fix; see [Claude accounts](claude-accounts.md) |
 | `unavailable (unsupported-platform)` for an Anthropic account on macOS | Claude Code's macOS login lives in the Keychain, which this plugin does not read per directory | Point `configDir` at a directory containing `.credentials.json`, or use the default Hermes login |
 | `unavailable (timeout)` after a refresh | A provider endpoint hung past the sweep budget | It drops its previous value until a refresh succeeds; check the provider's status page |

@@ -7,9 +7,9 @@ import os
 import tempfile
 import urllib.request
 import urllib.error
-from typing import Optional
+from typing import Any, Optional
 
-from .base import QuotaResult, QuotaWindow, build_unavailable, opt_in_flag, urlopen_no_redirect
+from .base import QuotaAccount, QuotaResult, QuotaWindow, build_unavailable, opt_in_flag, urlopen_no_redirect
 from .browser_cookies import (
     ChromeCookieError,
     load_chrome_grok_cookies,
@@ -347,4 +347,238 @@ def _fetch_grok_optin() -> Optional["QuotaResult"]:
     return fetch_grok_quota()
 
 
-_register("grok")(_fetch_grok_optin)
+# Unofficial Grok CLI billing surface. It is not api.x.ai and not the public
+# Management API. Shape verified against a live Hermes xai-oauth login.
+_OAUTH_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
+_OAUTH_SETTINGS_URL = "https://cli-chat-proxy.grok.com/v1/settings"
+_OAUTH_TIMEOUT_S = 4.0
+_OAUTH_BUDGET_S = 12.0
+_MAX_OAUTH_ACCOUNTS = 4
+_PRODUCT_NAMES = {"GrokBuild": "Grok Build", "GrokChat": "Grok Chat"}
+
+
+def _finite(value: Any) -> Optional[float]:
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number or number in (float("inf"), float("-inf")):
+        return None
+    return number
+
+
+def _money_val(config: dict, key: str) -> Optional[float]:
+    raw = config.get(key)
+    if not isinstance(raw, dict):
+        return None
+    return _finite(raw.get("val"))
+
+
+def _product_name(value: Any) -> str:
+    name = str(value or "").strip()
+    if name in _PRODUCT_NAMES:
+        return _PRODUCT_NAMES[name]
+    spaced = []
+    for char in name.replace("_", " ").replace("-", " "):
+        if spaced and char.isupper() and spaced[-1].islower():
+            spaced.append(" ")
+        spaced.append(char)
+    return " ".join("".join(spaced).split()).title() or "Unknown product"
+
+
+def _saved_xai_tokens() -> list[str]:
+    """Snapshot saved xai-oauth access tokens. Never refresh, select, or write."""
+    try:
+        from hermes_constants import get_default_hermes_root, get_hermes_home
+    except Exception:
+        return []
+    homes = []
+    for home in (get_hermes_home(), get_default_hermes_root()):
+        if home not in homes:
+            homes.append(home)
+    found: list[str] = []
+    for home in homes:
+        try:
+            store = json.loads((home / "auth.json").read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError, UnicodeError):
+            continue
+        if not isinstance(store, dict):
+            continue
+        providers = store.get("providers") if isinstance(store.get("providers"), dict) else {}
+        state = providers.get("xai-oauth") if isinstance(providers, dict) else None
+        tokens = state.get("tokens") if isinstance(state, dict) else None
+        access = tokens.get("access_token") if isinstance(tokens, dict) else None
+        if isinstance(access, str) and access.strip():
+            found.append(access.strip())
+        pool = store.get("credential_pool") if isinstance(store.get("credential_pool"), dict) else {}
+        rows = pool.get("xai-oauth") if isinstance(pool, dict) else None
+        for row in rows if isinstance(rows, list) else ():
+            if not isinstance(row, dict):
+                continue
+            access = row.get("access_token")
+            if isinstance(access, str) and access.strip():
+                found.append(access.strip())
+    unique: list[str] = []
+    for token in found:
+        if token not in unique:
+            unique.append(token)
+    return unique[:_MAX_OAUTH_ACCOUNTS]
+
+
+def _oauth_tokens() -> list[str]:
+    """Hermes-owned xai-oauth tokens, read-only. Unexpected resolver errors do not peek another account."""
+    tokens: list[str] = []
+    try:
+        from hermes_cli.auth import AuthError
+        from hermes_cli.auth_xai import resolve_xai_oauth_runtime_credentials
+    except Exception:
+        return _saved_xai_tokens()
+    try:
+        creds = resolve_xai_oauth_runtime_credentials(refresh_if_expiring=False)
+        token = str((creds or {}).get("api_key") or "").strip()
+        if token:
+            tokens.append(token)
+    except AuthError:
+        pass
+    except Exception:
+        return []
+    for token in _saved_xai_tokens():
+        if token not in tokens:
+            tokens.append(token)
+        if len(tokens) >= _MAX_OAUTH_ACCOUNTS:
+            break
+    return tokens[:_MAX_OAUTH_ACCOUNTS]
+
+
+def _oauth_get(url: str, token: str) -> tuple[Optional[dict], Optional[str]]:
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "x-xai-token-auth": "xai-grok-cli",
+        "x-grok-client-mode": "cli",
+        "User-Agent": "hermes-quota-plugin",
+    }
+    request = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urlopen_no_redirect(request, timeout=_OAUTH_TIMEOUT_S) as response:
+            body = response.read(65537)
+    except urllib.error.HTTPError as exc:
+        if exc.fp is not None:
+            exc.close()
+        if exc.code in (401, 403):
+            return None, "auth-failed"
+        return None, f"http-{exc.code}"
+    except Exception as exc:
+        return None, f"fetch-error:{type(exc).__name__}"
+    if len(body) > 65536:
+        return None, "response-too-large"
+    try:
+        payload = json.loads(body)
+    except (ValueError, UnicodeError):
+        return None, "bad-json"
+    if not isinstance(payload, dict):
+        return None, "bad-json"
+    return payload, None
+
+
+def _oauth_account(token: str, index: int) -> QuotaResult:
+    billing, reason = _oauth_get(_OAUTH_BILLING_URL, token)
+    if billing is None:
+        return build_unavailable("grok", reason or "no-data")
+    config = billing.get("config")
+    config = config if isinstance(config, dict) else {}
+    period = config.get("currentPeriod")
+    period = period if isinstance(period, dict) else {}
+    period_type = str(period.get("type") or "")
+    label = "Weekly pool" if "WEEKLY" in period_type.upper() else "Usage pool"
+    used = _finite(config.get("creditUsagePercent"))
+    reset = period.get("end") if isinstance(period.get("end"), str) and period.get("end") else None
+    windows: list[QuotaWindow] = []
+    if used is not None:
+        windows.append(QuotaWindow(label=label, used_percent=max(0.0, min(100.0, used)), reset_at=reset))
+    details: list[str] = []
+    for product in config.get("productUsage") if isinstance(config.get("productUsage"), list) else []:
+        if not isinstance(product, dict):
+            continue
+        percent = _finite(product.get("usagePercent"))
+        if percent is None:
+            continue
+        details.append(f"{_product_name(product.get('product'))}: {percent:g}% used")
+    cap, spent = _money_val(config, "onDemandCap"), _money_val(config, "onDemandUsed")
+    if cap == 0:
+        details.append("Pay-as-you-go: off")
+    elif cap is not None:
+        spent_part = f", used {spent:g} raw units" if spent is not None else ""
+        details.append(f"Pay-as-you-go: on (cap {cap:g} raw units{spent_part})")
+    prepaid = _money_val(config, "prepaidBalance")
+    if prepaid == 0:
+        details.append("Prepaid balance: $0")
+    elif prepaid is not None:
+        details.append(f"Prepaid balance: {prepaid:g} raw units")
+    plan = None
+    settings, _settings_reason = _oauth_get(_OAUTH_SETTINGS_URL, token)
+    if isinstance(settings, dict):
+        tier = settings.get("subscription_tier_display")
+        if isinstance(tier, str) and tier.strip():
+            plan = tier.strip()
+    if not windows:
+        return build_unavailable("grok", "subscription-usage-unavailable", details=details)
+    result = QuotaResult(label="grok", windows=windows, plan=plan, details=details)
+    result.account_label = f"Account {index}"
+    return result
+
+
+def _fetch_grok_oauth() -> QuotaResult:
+    """Subscription quota from Hermes xai-oauth. Never uses on-demand spend as the percentage."""
+    import time
+
+    tokens = _oauth_tokens()
+    if not tokens:
+        return build_unavailable("grok", "no-credentials")
+    deadline = time.monotonic() + _OAUTH_BUDGET_S
+    results: list[QuotaResult] = []
+    for index, token in enumerate(tokens, start=1):
+        if time.monotonic() >= deadline:
+            results.append(build_unavailable("grok", "timeout"))
+            break
+        results.append(_oauth_account(token, index))
+    chosen = next((item for item in results if item.has_data()), results[0])
+    extras = [item for item in results if item is not chosen]
+    if extras:
+        accounts = []
+        for offset, item in enumerate(extras, start=2):
+            accounts.append(QuotaAccount(
+                id=f"oauth-{offset}",
+                label=item.account_label or f"Account {offset}",
+                windows=list(item.windows),
+                plan=item.plan,
+                unavailable_reason=item.unavailable_reason,
+                details=list(item.details),
+            ))
+        chosen.accounts = accounts
+    return chosen
+
+
+def _fetch_grok_registered() -> QuotaResult:
+    """OAuth subscription quota first. Browser cookies remain the opt-in last resort."""
+    oauth = _fetch_grok_oauth()
+    if oauth.has_data():
+        return oauth
+    if oauth.unavailable_reason == "auth-failed" and _grok_enabled():
+        cookies = fetch_grok_quota()
+        if cookies is not None and cookies.has_data():
+            return cookies
+    if oauth.unavailable_reason != "no-credentials":
+        return oauth
+    if _grok_enabled():
+        return fetch_grok_quota()
+    return build_unavailable(
+        "grok",
+        "no-credentials",
+        details=["No Hermes xai-oauth token. Browser cookie fallback is opt-in and disabled."],
+    )
+
+
+_register("grok")(_fetch_grok_registered)

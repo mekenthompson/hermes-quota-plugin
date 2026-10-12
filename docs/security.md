@@ -1,7 +1,7 @@
 # Privacy and security
 
 - No telemetry. Cookies and tokens are never printed.
-- Grok cookies are used only for the Grok billing request, and only when you opt in.
+- Grok OAuth reads a Hermes `xai-oauth` access token and sends it only to the fixed Grok CLI billing and settings hosts. It does not refresh, rotate, or write that token. Cookies are used only for the opt-in fallback, and only when OAuth is missing or rejected.
 - Chrome/Firefox cookie values are never printed, cached, or written back to disk.
 - Extra Claude accounts are opt-in and read-only: an access token is read from the
   listed `.credentials.json`, used for one usage request, and never cached,

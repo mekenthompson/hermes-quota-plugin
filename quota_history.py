@@ -138,7 +138,18 @@ def read_history(days=30, provider=None):
 def daily_changes(rows):
     """Observed deltas, not API daily totals. Never bridge gaps or resets."""
     previous, totals = {}, {}
+    rows = sorted(rows, key=lambda row: (row["fetched_at"], row["provider"], row["account"], row["window"]))
+    present = {}
     for row in rows:
+        present.setdefault(row["fetched_at"], set()).add((row["provider"], row["account"], row["window"]))
+    last_stamp = None
+    for row in rows:
+        if row["fetched_at"] != last_stamp:
+            # A partial snapshot is evidence of a gap for each absent window.
+            # Keep continuity only for windows actually observed this sweep.
+            previous = {key: value for key, value in previous.items()
+                        if key in present[row["fetched_at"]]}
+            last_stamp = row["fetched_at"]
         if row["status"] != "ok":
             for old in list(previous):
                 if old[0] == row["provider"] and (not row["identity_verified"] or old[1] == row["account"]):

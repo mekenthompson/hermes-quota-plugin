@@ -144,6 +144,46 @@ class HistoryTest(unittest.TestCase):
             self.assertEqual(result.stdout, "")
             self.assertIn("diagnostic", result.stderr)
 
+    def test_missing_window_breaks_only_that_windows_continuity(self):
+        for stamp, week, session in (("2026-01-01T00:00:00+00:00", 20, 10),
+                                     ("2026-01-01T01:00:00+00:00", None, 15),
+                                     ("2026-01-01T02:00:00+00:00", 40, 20)):
+            sample = snapshot(stamp, used=week)
+            windows = sample["providers"]["grok"]["windows"]
+            if week is None:
+                windows.clear()
+            windows.append({"label": "session", "used_percent": session,
+                            "reset_at": "2026-01-08T00:00:00+00:00"})
+            history.record_snapshot(sample)
+        changes = history.daily_changes(history.read_history())
+        self.assertEqual([(r["window"], r["observed_percentage_points"]) for r in changes], [("session", 10)])
+        # Exercise both exposed handler seams without requiring FastAPI in the
+        # plugin's dependency-free offline test matrix.
+        import argparse
+        import contextlib
+        import io
+        constants = types.ModuleType("hermes_constants")
+        setattr(constants, "get_hermes_home", lambda: self.path.parent)
+        with mock.patch.dict(sys.modules, {"hermes_constants": constants}):
+            commands = importlib.import_module("quota_history_test.commands")
+        parser = argparse.ArgumentParser()
+        commands.setup_argparse(parser)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            commands._handle_cli(parser.parse_args(["history", "--json"]))
+        self.assertEqual(json.loads(output.getvalue())["daily_changes"], changes)
+        fastapi = types.ModuleType("fastapi")
+        class Router:
+            def get(self, path):
+                return lambda fn: fn
+            post = get
+        setattr(fastapi, "APIRouter", Router)
+        setattr(fastapi, "HTTPException", Exception)
+        with mock.patch.dict(sys.modules, {"fastapi": fastapi}):
+            api = importlib.import_module("quota_history_test.dashboard.plugin_api")
+            with mock.patch.object(api, "_cache", return_value=types.SimpleNamespace(__package__="quota_history_test")):
+                self.assertEqual(api.quota_history()["daily_changes"], changes)
+
     def test_account_and_window_separation(self):
         sample = snapshot()
         sample["providers"]["openai-codex"] = {"accounts": [

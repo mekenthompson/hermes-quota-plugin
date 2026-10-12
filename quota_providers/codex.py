@@ -151,15 +151,15 @@ def _credentials():
         auth = claims.get("https://api.openai.com/auth")
         account = auth.get("chatgpt_account_id") if isinstance(auth, dict) else None
         subject = claims.get("sub")
-        # Without both hints, only exact duplicate tokens can be collapsed.
+        saved_account = row.get("account_id")
+        if isinstance(saved_account, str) and saved_account.strip():
+            account = saved_account.strip()  # the actual request account scope
+        # Preserve distinct effective header scopes even on the same token.
         identity = (
             (account, subject)
             if isinstance(account, str) and isinstance(subject, str) and account and subject
-            else token
+            else (account, token)
         )
-        saved_account = row.get("account_id")
-        if isinstance(saved_account, str) and saved_account.strip():
-            account = saved_account.strip()  # legacy explicit header wins, not a grouping key
         expired = _is_expired(claims.get("exp")) or _is_expired(row.get("expires_at"))
         if identity not in unique:
             unique[identity] = (token, account, expired, _explicit_display_label(row, claims), row.get("base_url"), pooled)
@@ -279,7 +279,7 @@ def fetch_codex_quota(parse):
     for index in range(len(credentials)):
         result = results.get(index, build_unavailable("openai-codex", "timeout"))
         from .history_identity import identity_hint
-        result.history_id = identity_hint("openai-codex", credentials[index][0])
+        result.history_id = identity_hint("openai-codex", credentials[index][0], credentials[index][1])
         label = credentials[index][3]
         result.label = label or f"Account {index + 1}"
         if len(credentials) > 1:

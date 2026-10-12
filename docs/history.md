@@ -37,9 +37,10 @@ stored as unverified observations and are not silently combined into a trend.
 
 ## Hourly operation
 
-Use the scheduler's script-only/no-agent mode. Its script should invoke
-`hermes quota collect`, with stdout suppressed to avoid launcher diagnostics
-being delivered as recurring chat messages. Retain stderr and exit status.
+Use `scripts/collect-hourly.sh` with the scheduler's script-only/no-agent mode.
+The adapter preserves stderr and exit status while suppressing routine stdout.
+It resolves `HERMES_BIN` when explicitly set, then `hermes` on PATH, then the
+standard `/opt/hermes/bin/hermes` installation. A missing CLI fails nonzero.
 Schedule once per unique subscription account, using a representative profile
 that already owns its credentials. Do not copy credentials between profiles or
 poll the same shared subscription from every agent. Collection continues while

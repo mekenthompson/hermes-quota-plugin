@@ -410,6 +410,16 @@ def _known_expired(token: str) -> bool:
         return False
 
 
+def _stale_duplicate(token: str, alternatives: list[str]) -> bool:
+    """Expiry alone cannot prove two credentials represent the same account."""
+    from .history_identity import identity_hint
+    hint = identity_hint("grok", token)
+    return bool(hint and _known_expired(token) and any(
+        not _known_expired(other) and identity_hint("grok", other) == hint
+        for other in alternatives
+    ))
+
+
 def _saved_xai_tokens() -> list[str]:
     """Snapshot saved xai-oauth access tokens. Never refresh, select, or write."""
     try:
@@ -450,8 +460,8 @@ def _saved_xai_tokens() -> list[str]:
     # It is not evidence of another account. Preserve explicitly saved pool
     # entries (even failing ones), and keep legacy-only failures visible.
     stale_legacy = {
-        token for token in legacy if token not in pooled and _known_expired(token)
-    } if any(not _known_expired(token) for token in pooled) else set()
+        token for token in legacy if token not in pooled and _stale_duplicate(token, pooled)
+    }
     unique: list[str] = []
     for token in found:
         if token not in unique and token not in stale_legacy:
@@ -474,8 +484,7 @@ def _oauth_tokens() -> list[str]:
         # Some core versions resolve the old provider snapshot before the pool.
         # Do not put that expired snapshot back after the saved-token scan
         # excluded it. Explicit saved entries and resolver-only failure remain.
-        if token and (token in saved or not _known_expired(token)
-                      or not any(not _known_expired(item) for item in saved)):
+        if token and (token in saved or not _stale_duplicate(token, saved)):
             tokens.append(token)
     except AuthError:
         pass

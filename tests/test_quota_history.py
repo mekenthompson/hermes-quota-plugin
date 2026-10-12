@@ -112,6 +112,38 @@ class HistoryTest(unittest.TestCase):
             with self.assertRaises(OSError):
                 commands._handle_cli(parser.parse_args(["collect"]))
 
+    def test_reset_discontinuity_breaks_the_series(self):
+        for middle_reset in (None, "2026-01-09T00:00:00+00:00"):
+            with self.subTest(middle_reset=middle_reset):
+                if self.path.exists():
+                    self.path.unlink()
+                history.record_snapshot(snapshot())
+                history.record_snapshot(snapshot("2026-01-01T01:00:00+00:00", used=25, reset=middle_reset))
+                history.record_snapshot(snapshot("2026-01-01T02:00:00+00:00", used=40))
+                self.assertEqual(history.daily_changes(history.read_history()), [])
+
+    def test_scrubbed_failure_still_breaks_continuity(self):
+        history.record_snapshot(snapshot())
+        history.record_snapshot(snapshot("2026-01-01T01:00:00+00:00", used=30, reason="Bearer synthetic-secret"))
+        history.record_snapshot(snapshot("2026-01-01T02:00:00+00:00", used=40))
+        rows = history.read_history()
+        self.assertNotEqual(rows[1]["status"], "ok")
+        self.assertIsNone(rows[1]["used_percent"])
+        self.assertEqual(history.daily_changes(rows), [])
+
+    def test_hourly_adapter_is_silent_and_preserves_failure(self):
+        import os
+        import subprocess
+        cli = Path(self.tmp.name) / "fake-hermes"
+        for code in (0, 7):
+            cli.write_text('#!/bin/sh\n[ "$1 $2" = "quota collect" ] || exit 9\nprintf "routine output\\n"\nprintf "diagnostic\\n" >&2\nexit ' + str(code) + '\n')
+            cli.chmod(0o700)
+            result = subprocess.run(["bash", str(ROOT / "scripts/collect-hourly.sh")],
+                env={**os.environ, "HERMES_BIN": str(cli)}, capture_output=True, text=True)
+            self.assertEqual(result.returncode, code)
+            self.assertEqual(result.stdout, "")
+            self.assertIn("diagnostic", result.stderr)
+
     def test_account_and_window_separation(self):
         sample = snapshot()
         sample["providers"]["openai-codex"] = {"accounts": [

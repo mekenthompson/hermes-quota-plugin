@@ -48,8 +48,8 @@ class _Response:
 
 class GrokOAuthTests(unittest.TestCase):
     def test_expired_legacy_snapshot_does_not_become_a_second_account(self):
-        def jwt(exp):
-            payload = base64.urlsafe_b64encode(json.dumps({"exp": exp}).encode()).decode().rstrip("=")
+        def jwt(exp, subject="synthetic-shared"):
+            payload = base64.urlsafe_b64encode(json.dumps({"exp": exp, "sub": subject}).encode()).decode().rstrip("=")
             return f"header.{payload}.signature"
 
         live, expired = jwt(200), jwt(50)
@@ -76,8 +76,8 @@ class GrokOAuthTests(unittest.TestCase):
             self.assertEqual(auth.read_bytes(), before)
 
     def test_saved_pool_entries_and_legacy_only_failures_stay_visible(self):
-        def jwt(exp):
-            payload = base64.urlsafe_b64encode(json.dumps({"exp": exp}).encode()).decode().rstrip("=")
+        def jwt(exp, subject="synthetic-shared"):
+            payload = base64.urlsafe_b64encode(json.dumps({"exp": exp, "sub": subject}).encode()).decode().rstrip("=")
             return f"header.{payload}.signature"
 
         live, expired = jwt(200), jwt(50)
@@ -86,7 +86,8 @@ class GrokOAuthTests(unittest.TestCase):
             (live, [live], [live]),
             (live, ["opaque-account"], [live, "opaque-account"]),
             (expired, [expired, live], [expired, live]),
-            (expired, ["opaque-account"], ["opaque-account"]),
+            (expired, ["opaque-account"], [expired, "opaque-account"]),
+            (jwt(50, "distinct-subject"), [live], [jwt(50, "distinct-subject"), live]),
             ("malformed.jwt.value", [live], ["malformed.jwt.value", live]),
         ]
         for legacy, pool, expected in cases:
@@ -114,8 +115,8 @@ class GrokOAuthTests(unittest.TestCase):
                 self.assertFalse(grok._known_expired(f"header.{encoded}.signature"))
 
     def test_resolver_cannot_reintroduce_expired_snapshot(self):
-        def jwt(exp):
-            payload = base64.urlsafe_b64encode(json.dumps({"exp": exp}).encode()).decode().rstrip("=")
+        def jwt(exp, subject="synthetic-shared"):
+            payload = base64.urlsafe_b64encode(json.dumps({"exp": exp, "sub": subject}).encode()).decode().rstrip("=")
             return f"header.{payload}.signature"
 
         live, expired = jwt(200), jwt(50)

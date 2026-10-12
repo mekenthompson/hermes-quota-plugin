@@ -76,7 +76,9 @@ def record_snapshot(snapshot):
             verified = isinstance(hint, str) and re.fullmatch(r"[a-f0-9]{64}", hint) is not None
             account = hint if verified else f"unverified:{stamp}:{_text(key, 'unknown', 80)}:{index}"
             label = _text(rec.get("account_label") or rec.get("label"), provider)
-            reason = _text(rec.get("unavailable_reason"))
+            raw_reason = rec.get("unavailable_reason")
+            failed = raw_reason is not None and raw_reason != ""
+            reason = _text(raw_reason, "fetch-error") if failed else ""
             windows = rec.get("windows")
             windows = windows if isinstance(windows, list) and windows and not reason else [{}]
             for window in windows:
@@ -142,17 +144,17 @@ def daily_changes(rows):
                 if old[0] == row["provider"] and (not row["identity_verified"] or old[1] == row["account"]):
                     del previous[old]
             continue
-        key = (row["provider"], row["account"], row["window"], row["reset_at"])
+        key = (row["provider"], row["account"], row["window"])
         last = previous.get(key)
         previous[key] = row
-        if not row["identity_verified"] or not row["reset_at"] or row["status"] != "ok" or not last or last["status"] != "ok":
+        if not row["identity_verified"] or not row["reset_at"] or row["status"] != "ok" or not last or last["status"] != "ok" or row["reset_at"] != last["reset_at"]:
             continue
         elapsed = datetime.fromisoformat(row["fetched_at"]) - datetime.fromisoformat(last["fetched_at"])
         delta = row["used_percent"] - last["used_percent"]
         if not timedelta(0) < elapsed <= timedelta(hours=2) or delta < 0:
             continue
         day = row["fetched_at"][:10]
-        bucket = (day,) + key
+        bucket = (day,) + key + (row["reset_at"],)
         totals[bucket] = totals.get(bucket, 0.0) + delta
     return [{"day_utc": key[0], "provider": key[1], "account": key[2], "window": key[3],
              "reset_at": key[4], "observed_percentage_points": value}

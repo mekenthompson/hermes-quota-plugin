@@ -4,7 +4,7 @@ import hashlib
 import json
 
 
-def identity_hint(provider, token):
+def identity_hint(provider, token, effective_account=None):
     try:
         part = token.split(".")[1]
         if len(part) > 16384:
@@ -17,6 +17,10 @@ def identity_hint(provider, token):
             return None
         account = claims.get("https://api.openai.com/auth", {})
         account = account.get("chatgpt_account_id", "") if isinstance(account, dict) else ""
+        if isinstance(effective_account, str) and effective_account.strip():
+            account = effective_account.strip()
+        if provider == "openai-codex" and (not isinstance(account, str) or not account):
+            return None
         identity = json.dumps([provider, claims.get("iss", ""), subject, account], separators=(",", ":"))
         return hashlib.sha256(identity.encode()).hexdigest()
     except (ValueError, IndexError, UnicodeError, TypeError):

@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import base64
 import json
+from pathlib import Path
+import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -43,6 +47,72 @@ class _Response:
 
 
 class GrokOAuthTests(unittest.TestCase):
+    def test_expired_legacy_snapshot_does_not_become_a_second_account(self):
+        def jwt(exp):
+            payload = base64.urlsafe_b64encode(json.dumps({"exp": exp}).encode()).decode().rstrip("=")
+            return f"header.{payload}.signature"
+
+        live, expired = jwt(200), jwt(50)
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            auth = home / "auth.json"
+            auth.write_text(json.dumps({
+                "providers": {"xai-oauth": {"tokens": {"access_token": expired}}},
+                "credential_pool": {"xai-oauth": [{"access_token": live}]},
+            }))
+            before = auth.read_bytes()
+            constants = types.ModuleType("hermes_constants")
+            setattr(constants, "get_hermes_home", lambda: home)
+            setattr(constants, "get_default_hermes_root", lambda: home)
+            with mock.patch.dict("sys.modules", {"hermes_constants": constants}), \
+                 mock.patch("time.time", return_value=100):
+                tokens = grok._saved_xai_tokens()
+                with mock.patch.object(grok, "_oauth_tokens", return_value=tokens), \
+                     mock.patch.object(grok, "urlopen_no_redirect", return_value=_Response(_BILLING)) as request:
+                    result = grok._fetch_grok_oauth()
+            self.assertEqual(tokens, [live])
+            self.assertEqual(result.accounts, [])
+            self.assertEqual(request.call_count, 2)  # billing + settings, one credential
+            self.assertEqual(auth.read_bytes(), before)
+
+    def test_saved_pool_entries_and_legacy_only_failures_stay_visible(self):
+        def jwt(exp):
+            payload = base64.urlsafe_b64encode(json.dumps({"exp": exp}).encode()).decode().rstrip("=")
+            return f"header.{payload}.signature"
+
+        live, expired = jwt(200), jwt(50)
+        cases = [
+            (expired, [], [expired]),
+            (live, [live], [live]),
+            (live, ["opaque-account"], [live, "opaque-account"]),
+            (expired, [expired, live], [expired, live]),
+            (expired, ["opaque-account"], ["opaque-account"]),
+            ("malformed.jwt.value", [live], ["malformed.jwt.value", live]),
+        ]
+        for legacy, pool, expected in cases:
+            with self.subTest(pool_size=len(pool), legacy_expired=legacy == expired), \
+                 tempfile.TemporaryDirectory() as tmp:
+                home = Path(tmp)
+                auth = home / "auth.json"
+                auth.write_text(json.dumps({
+                    "providers": {"xai-oauth": {"tokens": {"access_token": legacy}}},
+                    "credential_pool": {"xai-oauth": [{"access_token": t} for t in pool]},
+                }))
+                before = auth.read_bytes()
+                constants = types.ModuleType("hermes_constants")
+                setattr(constants, "get_hermes_home", lambda: home)
+                setattr(constants, "get_default_hermes_root", lambda: home)
+                with mock.patch.dict("sys.modules", {"hermes_constants": constants}), \
+                     mock.patch("time.time", return_value=100):
+                    self.assertEqual(grok._saved_xai_tokens(), expected)
+                self.assertEqual(auth.read_bytes(), before)
+
+    def test_unknown_jwt_expiry_is_not_treated_as_expired(self):
+        for payload in ({}, {"exp": True}, {"exp": "50"}, {"exp": float("nan")}, []):
+            encoded = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+            with self.subTest(payload=payload):
+                self.assertFalse(grok._known_expired(f"header.{encoded}.signature"))
+
     def test_subscription_percent_ignores_on_demand_and_prepaid(self):
         def opener(request, timeout):
             del timeout

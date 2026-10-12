@@ -278,6 +278,8 @@ def fetch_codex_quota(parse):
     accounts = []
     for index in range(len(credentials)):
         result = results.get(index, build_unavailable("openai-codex", "timeout"))
+        from .history_identity import identity_hint
+        result.history_id = identity_hint("openai-codex", credentials[index][0])
         label = credentials[index][3]
         result.label = label or f"Account {index + 1}"
         if len(credentials) > 1:

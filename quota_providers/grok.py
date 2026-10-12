@@ -580,7 +580,10 @@ def _fetch_grok_oauth() -> QuotaResult:
         if time.monotonic() >= deadline:
             results.append(build_unavailable("grok", "timeout"))
             break
-        results.append(_oauth_account(token, index))
+        item = _oauth_account(token, index)
+        from .history_identity import identity_hint
+        item.history_id = identity_hint("grok", token)
+        results.append(item)
     chosen = next((item for item in results if item.has_data()), results[0])
     extras = [item for item in results if item is not chosen]
     if extras:
@@ -593,6 +596,7 @@ def _fetch_grok_oauth() -> QuotaResult:
                 plan=item.plan,
                 unavailable_reason=item.unavailable_reason,
                 details=list(item.details),
+                history_id=item.history_id,
             ))
         chosen.accounts = accounts
     return chosen

@@ -128,6 +128,8 @@ def _result_to_record(res: QuotaResult) -> dict[str, Any]:
             for w in res.windows
         ],
     }
+    if res.history_id:
+        record["history_id"] = res.history_id
     if res.account_label:
         record["account_label"] = res.account_label
     if res.accounts:
@@ -138,6 +140,7 @@ def _result_to_record(res: QuotaResult) -> dict[str, Any]:
                 "plan": account.plan,
                 "unavailable_reason": account.unavailable_reason,
                 "details": list(account.details or []),
+                **({"history_id": account.history_id} if account.history_id else {}),
                 "windows": [
                     {"label": w.label, "used_percent": w.used_percent, "reset_at": w.reset_at}
                     for w in account.windows
@@ -218,6 +221,7 @@ def _expand_accounts(provider_id: str, record: Any) -> dict[str, Any]:
             "windows": windows if isinstance(windows, list) else [],
             "account_balances": [],
             "api_calls_available": None,
+            **({"history_id": account["history_id"]} if account.get("history_id") else {}),
         }
     return rows
 

@@ -75,6 +75,7 @@ class QuotaAccount:
     plan: Optional[str] = None
     unavailable_reason: Optional[str] = None
     details: list[str] = field(default_factory=list)
+    history_id: Optional[str] = None
 
     def has_data(self) -> bool:
         return (bool(self.windows) or bool(self.details)) and self.unavailable_reason is None
@@ -105,6 +106,8 @@ class QuotaResult:
     accounts: list[Union[QuotaAccount, QuotaResult]] = field(default_factory=list)
     # Explicit label for legacy single-account provider records (Codex).
     account_label: Optional[str] = None
+    # Pseudonymous stable identity for history only; never a token fingerprint.
+    history_id: Optional[str] = None
 
     def has_data(self) -> bool:
         return (

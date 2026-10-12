@@ -13,7 +13,7 @@ PLUGIN_DIR="$HOME_DIR/plugins/quota"
 DESKTOP_DIR="$HOME_DIR/desktop-plugins/quota"
 
 for required in \
-  plugin.yaml __init__.py commands.py quota_cache.py quota_providers \
+  plugin.yaml __init__.py commands.py quota_cache.py quota_history.py quota_providers \
   desktop/plugin.js \
   scripts/hermes-home.sh scripts/hermes-config.sh; do
   [ -e "$REPO_ROOT/$required" ] || {
@@ -38,7 +38,7 @@ BACKUP_DESKTOP="$STAGE_DIR/backup-desktop"
 mkdir -p "$STAGE_PLUGIN" "$STAGE_DESKTOP"
 
 for item in \
-  plugin.yaml __init__.py commands.py quota_cache.py quota_providers \
+  plugin.yaml __init__.py commands.py quota_cache.py quota_history.py quota_providers \
   LICENSE scripts; do
   [ -e "$REPO_ROOT/$item" ] && cp -R "$REPO_ROOT/$item" "$STAGE_PLUGIN/"
 done

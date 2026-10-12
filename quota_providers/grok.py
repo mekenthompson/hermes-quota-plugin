@@ -462,21 +462,26 @@ def _saved_xai_tokens() -> list[str]:
 def _oauth_tokens() -> list[str]:
     """Hermes-owned xai-oauth tokens, read-only. Unexpected resolver errors do not peek another account."""
     tokens: list[str] = []
+    saved = _saved_xai_tokens()
     try:
         from hermes_cli.auth import AuthError
         from hermes_cli.auth_xai import resolve_xai_oauth_runtime_credentials
     except Exception:
-        return _saved_xai_tokens()
+        return saved
     try:
         creds = resolve_xai_oauth_runtime_credentials(refresh_if_expiring=False)
         token = str((creds or {}).get("api_key") or "").strip()
-        if token:
+        # Some core versions resolve the old provider snapshot before the pool.
+        # Do not put that expired snapshot back after the saved-token scan
+        # excluded it. Explicit saved entries and resolver-only failure remain.
+        if token and (token in saved or not _known_expired(token)
+                      or not any(not _known_expired(item) for item in saved)):
             tokens.append(token)
     except AuthError:
         pass
     except Exception:
         return []
-    for token in _saved_xai_tokens():
+    for token in saved:
         if token not in tokens:
             tokens.append(token)
         if len(tokens) >= _MAX_OAUTH_ACCOUNTS:

@@ -690,6 +690,7 @@ def _claude_account_results(
     *,
     primary_token: Optional[str],
     deadline: Deadline,
+    primary_result: Optional[QuotaResult] = None,
 ) -> list[QuotaAccount]:
     """Fetch every configured extra account under one shared deadline.
 
@@ -745,6 +746,14 @@ def _claude_account_results(
             continue
         fingerprint = _token_fingerprint(token)
         if fingerprint in seen_tokens:
+            # An explicitly opted-in directory may own the primary's exact
+            # credential. Keep its identity on the existing primary card,
+            # without fetching usage again or inventing a second account.
+            if (primary_result is not None and fingerprint == primary_fp
+                    and not primary_result.unavailable_reason
+                    and not primary_result.history_id
+                    and entry.get("verify_history_identity") is True):
+                primary_result.history_id = _claude_history_identity(token, timeout=deadline.slice(3.0))
             continue
         seen_tokens.add(fingerprint)
         payload, reason = _request_anthropic_usage(
@@ -819,7 +828,7 @@ def _fetch_anthropic_multi(entries: list[dict[str, Any]]) -> QuotaResult:
 
     result = primary or build_unavailable("anthropic", primary_reason or "no-data")
     result.accounts = _claude_account_results(
-        entries, primary_token=token, deadline=deadline)
+        entries, primary_token=token, deadline=deadline, primary_result=result)
     return result
 
 

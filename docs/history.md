@@ -65,6 +65,10 @@ This adds one bounded read of `/api/oauth/profile` with the exact token used for
 the quota read. Both authenticated account and organization UUIDs are required;
 only their domain-separated hash is stored. Missing/failed profile identity
 remains unverified; local `.claude.json` metadata cannot establish the binding.
+When an explicitly opted-in directory contains the primary card's exact token,
+the existing primary card receives that identity instead of creating a duplicate
+card or making a second usage request. The opt-in does not verify a failed
+primary quota read.
 
 ## Hourly operation
 

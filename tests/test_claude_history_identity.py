@@ -44,6 +44,27 @@ class ClaudeIdentityTests(unittest.TestCase):
                 identity.assert_not_called()
                 self.assertIsNone(accounts[0].history_id)
 
+    def test_opted_in_duplicate_primary_keeps_identity_without_second_usage_read(self):
+        entry={'id':'personal','label':'Personal','config_dir':'/synthetic','verify_history_identity':True}
+        usage={'five_hour':{'utilization':20,'resets_at':'2026-01-02T00:00:00Z'}}
+        with mock.patch.object(b,'_core_anthropic_token',return_value='synthetic-primary'),mock.patch.object(b,'_core_anthropic_is_oauth',return_value=True),mock.patch.object(b,'_read_claude_account_token',return_value=('synthetic-primary',None)),mock.patch.object(b,'_request_anthropic_usage',return_value=(usage,None)) as fetch,mock.patch.object(b,'_claude_history_identity',return_value='b'*64) as identity:
+            result=b._fetch_anthropic_multi([entry])
+            self.assertEqual(result.history_id,'b'*64)
+            self.assertEqual(result.accounts,[])
+            fetch.assert_called_once()
+            self.assertEqual(identity.call_args.args,('synthetic-primary',))
+
+    def test_duplicate_primary_identity_remains_opt_in_and_failure_safe(self):
+        entry={'id':'personal','label':'Personal','config_dir':'/synthetic'}
+        usage={'five_hour':{'utilization':20,'resets_at':'2026-01-02T00:00:00Z'}}
+        for opted_in,failed in ((False,False),(True,True)):
+            entry['verify_history_identity']=opted_in
+            with mock.patch.object(b,'_core_anthropic_token',return_value='synthetic-primary'),mock.patch.object(b,'_core_anthropic_is_oauth',return_value=True),mock.patch.object(b,'_read_claude_account_token',return_value=('synthetic-primary',None)),mock.patch.object(b,'_request_anthropic_usage',return_value=(None,'auth-failed') if failed else (usage,None)),mock.patch.object(b,'_claude_history_identity') as identity:
+                result=b._fetch_anthropic_multi([entry])
+                self.assertIsNone(result.history_id)
+                self.assertEqual(result.accounts,[])
+                identity.assert_not_called()
+
     def test_setting_requires_explicit_boolean_opt_in(self):
         import types
         config=types.ModuleType('hermes_cli.config')

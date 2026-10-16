@@ -105,6 +105,13 @@ def quota_history(days: int = 30) -> dict[str, Any]:
     return {"samples": rows, "daily_changes": history.daily_changes(rows)}
 
 
+@router.get("/forecast")
+def quota_forecast() -> dict[str, Any]:
+    import importlib
+    history = importlib.import_module(_cache().__package__ + ".quota_history")
+    return {"forecasts": history.forecasts(history.read_history(days=2))}
+
+
 @router.get("/status")
 def quota_status() -> dict[str, Any]:
     return public_snapshot()

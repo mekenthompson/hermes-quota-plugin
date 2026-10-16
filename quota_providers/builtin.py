@@ -336,6 +336,35 @@ def _request_anthropic_usage(
     return payload, None
 
 
+def _claude_history_identity(token: str, *, timeout: float) -> Optional[str]:
+    """Opt-in same-token profile read. Never trust .claude.json identity hints.
+
+    Both account and organization are required: a user can own subscriptions in
+    several organizations. Only their domain-separated hash leaves this call.
+    No response bodies, email addresses, raw IDs or credential hashes persist.
+    """
+    if timeout <= 0:
+        return None
+    request = urllib.request.Request(
+        "https://api.anthropic.com/api/oauth/profile",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json",
+                 "User-Agent": "hermes-quota-plugin/2.10.0"}, method="GET")
+    try:
+        import uuid
+        with urlopen_no_redirect(request, timeout=min(timeout, 3.0)) as response:
+            body = response.read(_MAX_HTTP_BYTES + 1)
+        if len(body) > _MAX_HTTP_BYTES:
+            return None
+        payload = json.loads(body)
+        account = payload.get("account", {}).get("uuid")
+        organization = payload.get("organization", {}).get("uuid")
+        account = str(uuid.UUID(account))
+        organization = str(uuid.UUID(organization))
+        return hashlib.sha256(json.dumps(["anthropic", account, organization], separators=(",", ":")).encode()).hexdigest()
+    except Exception:
+        return None
+
+
 def _anthropic_usage_payload() -> tuple[Optional[dict[str, Any]], Optional[str]]:
     """Fetch the OAuth usage payload once for the core-resolved account."""
     token = _core_anthropic_token()
@@ -540,6 +569,7 @@ def _claude_accounts_setting() -> tuple[list[dict[str, Any]], bool]:
             "id": account_id,
             "label": label.strip() if isinstance(label, str) and label.strip() else account_id,
             "config_dir": config_dir.strip(),
+            **({"verify_history_identity": True} if item.get("verifyHistoryIdentity") is True else {}),
         })
     if truncated:
         out.append({
@@ -728,9 +758,11 @@ def _claude_account_results(
             accounts.append(QuotaAccount(id=entry["id"], label=entry["label"],
                                          unavailable_reason="no-data"))
             continue
+        history_id = (_claude_history_identity(token, timeout=deadline.slice(3.0))
+                      if entry.get("verify_history_identity") is True else None)
         accounts.append(QuotaAccount(id=entry["id"], label=entry["label"],
                                      plan=_claude_subscription_type(str(account_dir)),
-                                     windows=windows, details=details))
+                                     windows=windows, details=details, history_id=history_id))
     if overflow:
         accounts.append(QuotaAccount(
             id=f"{GENERATED_ACCOUNT_ID_PREFIX}limit",

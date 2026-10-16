@@ -66,6 +66,11 @@ jobs:
             echo "OK $f"
           done
 
+      - name: Dashboard forecast rendering
+        run: |
+          node --check dashboard/dist/index.js
+          node tests/dashboard_forecast.cjs
+
       - name: Biome lint (format gate intentionally off)
         run: npx --yes @biomejs/biome lint desktop/
 

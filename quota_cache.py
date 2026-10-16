@@ -256,7 +256,7 @@ def _fetch_one(provider_id: str, fetcher: Any) -> dict[str, Any]:
         return _unavailable_record(provider_id, "fetch-error")
 
 
-def refresh_quota_cache(*, budget: Optional[float] = None) -> dict[str, Any]:
+def refresh_quota_cache(*, budget: Optional[float] = None, provider_ids=None, persist=True) -> dict[str, Any]:
     """Run every registered provider fetcher concurrently and write the cache.
 
     Bounded by ``budget`` seconds (``REFRESH_BUDGET_S`` default) and run on
@@ -269,6 +269,11 @@ def refresh_quota_cache(*, budget: Optional[float] = None) -> dict[str, Any]:
     """
     budget_s = REFRESH_BUDGET_S if budget is None else max(0.0, float(budget))
     items = list(PROVIDER_FETCHERS.items())
+    if provider_ids is not None:
+        if not provider_ids or any(pid not in PROVIDER_FETCHERS for pid in provider_ids):
+            raise ValueError("unknown or empty quota provider selection")
+        selected = set(provider_ids)
+        items = [(pid, fetcher) for pid, fetcher in items if pid in selected]
     results: dict[str, Any] = {}
     lock = threading.Lock()
 
@@ -311,6 +316,8 @@ def refresh_quota_cache(*, budget: Optional[float] = None) -> dict[str, Any]:
             providers.update(_expand_accounts(provider_id, record))
 
     cache = {"fetched_at": datetime.now(timezone.utc).isoformat(), "providers": providers}
+    if not persist:
+        return cache
 
     try:
         with _CACHE_LOCK:
@@ -323,6 +330,35 @@ def refresh_quota_cache(*, budget: Optional[float] = None) -> dict[str, Any]:
         logger.debug("quota_cache ▸ write failed", exc_info=True)
 
     return cache
+
+
+def ingest_snapshot(snapshot):
+    """Persist an explicitly supplied sanitized account sweep; no vendor I/O.
+
+    History is authoritative. A failed display-cache update propagates; retrying
+    the identical sweep is safe because history inserts are idempotent.
+    """
+    from .quota_history import sanitize_snapshot, record_snapshot
+    from pathlib import Path
+    clean = sanitize_snapshot(snapshot)
+    with _CACHE_LOCK:
+        previous = read_quota_cache().get("fetched_at")
+        if previous and datetime.fromisoformat(clean["fetched_at"]) < datetime.fromisoformat(previous.replace("Z", "+00:00")):
+            raise ValueError("refusing to replace newer quota cache with older snapshot")
+        path = Path(_cache_path())
+        if path.is_symlink():
+            raise ValueError("quota cache path must not be a symlink")
+        record_snapshot(clean)
+        import tempfile
+        fd, temp = tempfile.mkstemp(prefix=".quota-ingest-", dir=str(path.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(clean, stream, sort_keys=True)
+            os.replace(temp, path)
+        finally:
+            if os.path.exists(temp):
+                os.unlink(temp)
+    return clean
 
 
 def is_fresh() -> bool:

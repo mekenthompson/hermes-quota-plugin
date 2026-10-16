@@ -244,6 +244,12 @@ def setup_argparse(subparser):
         action="store_true",
         help="Never refresh: emit the cache as-is (desktop widget poll path)",
     )
+    sample = subs.add_parser("sample", help="Fetch selected providers as sanitized JSON without changing cache/history")
+    sample.add_argument("--provider", action="append", required=True, choices=_PROVIDER_IDS)
+    subs.add_parser("ingest", help="Read a sanitized quota sweep from stdin into history/cache (no vendor calls)")
+    forecast = subs.add_parser("forecast", help="Estimate shared-account quota at reset from stored observations")
+    forecast.add_argument("--json", action="store_true")
+    forecast.add_argument("--provider", default=None)
     subs.add_parser("collect", help="Fetch and durably store a history sample (silent on success)")
     hist = subs.add_parser("history", help="Read stored quota observations, not API daily totals")
     hist.add_argument("--json", action="store_true")
@@ -259,6 +265,31 @@ def setup_argparse(subparser):
 
 def _handle_cli(args):
     cmd = getattr(args, "quota_command", None) or "status"
+    if cmd == "sample":
+        from .quota_history import sanitize_snapshot
+        snapshot = refresh_quota_cache(provider_ids=args.provider, persist=False)
+        print(json.dumps(sanitize_snapshot(snapshot), sort_keys=True))
+        return
+    if cmd == "ingest":
+        from .quota_cache import ingest_snapshot
+        raw = sys.stdin.read(1024 * 1024 + 1)
+        if len(raw) > 1024 * 1024:
+            raise ValueError("quota snapshot exceeds 1 MiB input limit")
+        ingest_snapshot(json.loads(raw))
+        return
+    if cmd == "forecast":
+        from .quota_history import read_history, forecasts
+        values = forecasts(read_history(days=2, provider=getattr(args, "provider", None)))
+        if getattr(args, "json", False):
+            print(json.dumps({"forecasts": values}, sort_keys=True))
+        else:
+            print("Shared-account quota: vendor usage includes every client using this account. Estimates assume recent observed pace continues.")
+            for row in values:
+                detail = row["status"]
+                if row["projected_used_percent_at_reset"] is not None:
+                    detail += f"; projected {row['projected_used_percent_at_reset']:.1f}% used at reset; exhaustion {row['estimated_exhaustion_at']}"
+                print(f"{row['label']} · {row['window']}: {detail}")
+        return
     if cmd == "collect":
         from .quota_history import record_snapshot
         record_snapshot(refresh_quota_cache())

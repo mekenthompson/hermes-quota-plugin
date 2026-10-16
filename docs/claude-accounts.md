@@ -106,9 +106,18 @@ Platform notes — only what is proven:
   `/quota`, the footer and the widget tooltip. Nothing is silently ignored and no
   credential is read for a malformed entry.
 
-Vendor account identity is not collected; a user-supplied label may itself identify a person: the cache carries only your `id`/`label`, the
-computed windows and machine-readable reasons — never a token or a filesystem
-path.
+Vendor identity is not collected by default. An extra account can explicitly
+set `verifyHistoryIdentity: true` to request a bounded, redirect-free
+`GET https://api.anthropic.com/api/oauth/profile` with the same token used for
+its quota request. The account UUID plus organization UUID are required and
+hashed together for history grouping; neither raw ID, email nor profile response
+is retained. Profile failure leaves quota visible but history unverified. This
+never trusts `.claude.json` identity metadata or refreshes credentials.
+
+A user-supplied label may itself identify a person: the cache otherwise carries
+only your `id`/`label`, computed windows and machine-readable reasons, never a
+token or filesystem path. For Claude ACP, explicitly list that profile's own
+`CLAUDE_CONFIG_DIR` as `configDir`; do not copy another profile's credentials.
 
 
 ## Friendly names and icons

@@ -256,6 +256,16 @@ def _fetch_one(provider_id: str, fetcher: Any) -> dict[str, Any]:
         return _unavailable_record(provider_id, "fetch-error")
 
 
+def managed_collection_enabled() -> bool:
+    """Explicit collector ownership prevents local refresh from erasing a sweep."""
+    try:
+        from hermes_cli.config import load_config_readonly
+        config = load_config_readonly() or {}
+        return config.get("plugins", {}).get("entries", {}).get("quota", {}).get("settings", {}).get("managedCollection") is True
+    except Exception:
+        return False
+
+
 def refresh_quota_cache(*, budget: Optional[float] = None, provider_ids=None, persist=True) -> dict[str, Any]:
     """Run every registered provider fetcher concurrently and write the cache.
 
@@ -267,6 +277,8 @@ def refresh_quota_cache(*, budget: Optional[float] = None, provider_ids=None, pe
     leaves an ``unavailable_reason`` record rather than aborting the sweep.
     Returns the cache dict that was written.
     """
+    if persist and managed_collection_enabled():
+        raise ValueError("quota view is collector-managed; use sample/ingest instead of local refresh")
     budget_s = REFRESH_BUDGET_S if budget is None else max(0.0, float(budget))
     items = list(PROVIDER_FETCHERS.items())
     if provider_ids is not None:

@@ -64,6 +64,13 @@ class ForecastTest(unittest.TestCase):
                     with mock.patch.object(api,'_cache',return_value=types.SimpleNamespace(__package__='forecast_plugin')):
                         self.assertEqual(api.quota_forecast()['forecasts'],expected)
 
+    def test_retired_accounts_do_not_appear_as_current_forecasts(self):
+        values=h.forecasts([row(0,20),row(1,22),row(2,24,account='b'*64)],now='2026-01-01T02:00:00+00:00')
+        self.assertEqual([f['account'] for f in values],['b'*64])
+        rows=[row(0,20,window='Weekly'),row(0,10,window='Session'),row(1,22,window='Weekly'),row(2,24,window='Weekly')]
+        values=h.forecasts(rows,now='2026-01-01T02:00:00+00:00')
+        self.assertEqual({f['window']:f['status'] for f in values},{'Weekly':'exhausts-before-reset','Session':'missing-latest-observation'})
+
     def test_distinct_accounts_are_not_summed(self):
         rows=[row(i,20+i) for i in range(3)]+[row(i,70+i,account='b'*64) for i in range(3)]
         values=h.forecasts(rows,now='2026-01-01T02:00:00+00:00')

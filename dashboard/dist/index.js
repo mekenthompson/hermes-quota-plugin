@@ -61,11 +61,21 @@
     var hist = historyState[0];
     var setHistory = historyState[1];
 
+    var forecastState = React.useState(null);
+    var forecast = forecastState[0];
+    var setForecast = forecastState[1];
+
+    function loadHistory() {
+      fetchJSON("/api/plugins/quota/history").then(setHistory).catch(function () { setHistory({ error: true }); });
+      fetchJSON("/api/plugins/quota/forecast").then(setForecast).catch(function () { setForecast({ error: true }); });
+    }
+
     function load(refresh) {
       setSnap(function (prev) { return { loading: true, error: "", data: prev.data }; });
       var url = refresh ? "/api/plugins/quota/refresh" : "/api/plugins/quota/status";
       fetchJSON(url, refresh ? { method: "POST" } : undefined).then(function (data) {
         setSnap({ loading: false, error: "", data: data });
+        loadHistory();
       }).catch(function (err) {
         setSnap(function (prev) { return { loading: false, error: String(err && err.message || err), data: prev.data }; });
       });
@@ -73,7 +83,6 @@
 
     React.useEffect(function () {
       load(false);
-      fetchJSON("/api/plugins/quota/history").then(setHistory).catch(function () { setHistory({ error: true }); });
     }, []);
 
     var providers = snap.data && snap.data.providers ? snap.data.providers : {};
@@ -91,8 +100,23 @@
         "Bars are remaining subscription allowance. OpenRouter is a prepaid wallet, not a subscription. Tailnet only."
       ),
       snap.error ? h("p", null, snap.error) : null,
+      h("h2", { style: { fontSize: 16, marginTop: 20 } }, "Will the quota last until reset?"),
+      h("p", { style: { fontSize: 12 } }, "Each shared account already includes all clients using it. Accounts and windows are never summed. Estimates assume the last 24 hours of continuous observed pace continues; they are not a vendor guarantee."),
+      !forecast ? h("p", null, "Loading forecast") : forecast.error ? h("p", null, "Forecast unavailable") :
+        (forecast.forecasts || []).map(function (f, i) {
+          var estimate = f.projected_used_percent_at_reset;
+          return h("section", { key: f.provider + f.account + f.window + i, style: { marginBottom: 14 } },
+            h("strong", null, f.label + " · " + f.window),
+            h("div", null, f.used_percent == null ? "Usage unavailable" : f.used_percent.toFixed(1) + "% used · " + f.remaining_percent.toFixed(1) + "% remaining at last sample"),
+            h("div", null, f.status),
+            f.reset_at ? h("div", null, "Resets " + when(f.reset_at)) : null,
+            estimate == null ? null : h("div", null, "Projected demand: " + estimate.toFixed(1) + "% of quota by reset · " + f.rate_percentage_points_per_hour.toFixed(2) + " percentage points/hour"),
+            f.estimated_exhaustion_at ? h("div", null, "Estimated exhaustion at observed pace: " + when(f.estimated_exhaustion_at)) : null,
+            h("div", { style: { fontSize: 12 } }, "Observed " + when(f.fetched_at) + " · " + f.sample_count + " continuous samples")
+          );
+        }),
       h("h2", { style: { fontSize: 16, marginTop: 20 } }, "Observed daily quota changes (UTC)"),
-      h("p", { style: { fontSize: 12 } }, "Sampled percentage-point changes, not vendor daily usage totals. Gaps, unknown identities and resets are not joined. No forecast yet."),
+      h("p", { style: { fontSize: 12 } }, "Sampled percentage-point changes, not vendor daily usage totals. Gaps, unknown identities and resets are not joined."),
       !hist ? h("p", null, "Loading history") : hist.error ? h("p", null, "History unavailable") :
         h("div", null,
           h("p", null, String((hist.samples || []).length) + " stored observations. Scheduled collection is configured separately; this page does not poll providers automatically."),

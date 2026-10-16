@@ -27,13 +27,44 @@ the dashboard has loaded a new route.
 Daily changes are **observed percentage-point deltas**, not vendor-provided daily
 usage totals. Days are UTC. Deltas crossing an error, a gap longer than two
 hours, a percentage decrease or a changed reset are excluded. Unknown account
-identity and missing reset times are not joined into trends. There is no
-run-out forecast yet and no retrospective reconstruction of previous usage.
+identity and missing reset times are not joined into trends. No previous usage
+is reconstructed retrospectively.
+
+## Period forecasts and shared accounts
+
+`hermes quota forecast --json` and `/api/plugins/quota/forecast` read stored
+observations only. The dashboard shows used/remaining percentages, reset time,
+observed percentage points per hour, projected demand by reset and estimated
+exhaustion. **Each account already reflects every client spending its quota.**
+Do not add percentages from different agents, accounts or windows together.
+
+The estimate assumes recent observed pace continues, not that future workload
+is known. It uses at most 24 hours of continuous samples, requires three samples
+spanning at least two hours, and never bridges errors, missing windows, changed
+resets, percentage decreases or gaps longer than two hours. Stale, unknown,
+reset-due and insufficient states are explicit. Zero measured burn is not a
+promise of enough future quota. Demand above 100% means the projected workload
+would exceed the allowance. Exhaustion after reset is conditional arithmetic,
+not a forecast of usage in the next period.
+
+For isolated credential owners, `hermes quota sample --provider grok` emits a
+sanitized snapshot without changing local cache/history. Repeat `--provider`
+for a bounded provider subset; unselected providers are not polled. Transfer
+only that quota payload, never credentials, to a trusted controller, then feed
+one combined, current sweep to `hermes quota ingest` on stdin. Ingest validates
+and strips unknown fields, records history idempotently and updates the display
+cache. It performs no vendor requests. Keep errors in the sweep instead of
+reusing old successful values. A trusted orchestrator must enforce source
+freshness, account coverage and one representative source per account. It must
+not forge an old sample's timestamp to make it look current.
 
 Grok and Codex derive a pseudonymous hint from stable JWT subject/account claims,
 not from the access token. It is a grouping hint, not authentication proof.
-Opaque-token providers, including Claude where no stable claim is exposed, are
-stored as unverified observations and are not silently combined into a trend.
+Claude extra accounts may explicitly opt in to `verifyHistoryIdentity: true`.
+This adds one bounded read of `/api/oauth/profile` with the exact token used for
+the quota read. Both authenticated account and organization UUIDs are required;
+only their domain-separated hash is stored. Missing/failed profile identity
+remains unverified; local `.claude.json` metadata cannot establish the binding.
 
 ## Hourly operation
 

@@ -230,6 +230,7 @@ def forecasts(rows, now=None):
             cutoff = datetime.fromisoformat(fetched) - timedelta(hours=24)
             segments[key] = [r for r in segment if datetime.fromisoformat(r["fetched_at"]) >= cutoff]
     newest = ordered[-1]["fetched_at"] if ordered else None
+    active_accounts = {(r["provider"], r["account"]) for r in sweeps.get(newest, [])}
     output = []
     # Unverified observations have deliberately unique storage identities. Only
     # the newest display row is useful; this is presentation deduplication, not
@@ -239,6 +240,8 @@ def forecasts(rows, now=None):
         if not last["identity_verified"]:
             unknown_latest[(key[0], last["label"], key[2])] = last["fetched_at"]
     for key, last in sorted(latest.items()):
+        if (key[0], key[1]) not in active_accounts:
+            continue
         if (not last["identity_verified"] and
                 last["fetched_at"] != unknown_latest[(key[0], last["label"], key[2])]):
             continue

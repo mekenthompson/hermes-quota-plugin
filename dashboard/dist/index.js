@@ -94,7 +94,7 @@
     return h("div", { style: { padding: 20, maxWidth: 760, color: "var(--ui-text-secondary)" } },
       h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center" } },
         h("h1", { style: { fontSize: 20, margin: 0 } }, "Quota"),
-        h("button", { type: "button", onClick: function () { load(true); }, disabled: snap.loading }, snap.loading ? "Refreshing" : "Refresh")
+        h("button", { type: "button", onClick: function () { load(true); }, disabled: snap.loading }, snap.loading ? "Loading" : snap.data && snap.data.managed_collection ? "Reload" : "Refresh")
       ),
       h("p", { style: { fontSize: 13, color: "var(--ui-text-tertiary)" } },
         "Bars are remaining subscription allowance. OpenRouter is a prepaid wallet, not a subscription. Tailnet only."

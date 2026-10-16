@@ -70,6 +70,22 @@ the existing primary card receives that identity instead of creating a duplicate
 card or making a second usage request. The opt-in does not verify a failed
 primary quota read.
 
+## Collector-managed views
+
+After configuring a representative-source collector, set
+`plugins.entries.quota.settings.managedCollection` to the boolean `true` on
+the controller only. Local persist-and-refresh commands then refuse before any
+vendor request, so they cannot erase the combined view with controller-only
+readings. `sample` (nonpersisting) and `ingest` remain available. The dashboard
+button becomes **Reload** and reads the existing snapshot without polling
+providers. Missing/stale collection remains visible; a reload is not a fresh
+vendor sample. Standalone behavior is unchanged unless explicitly enabled.
+
+Forecast cards include only accounts present in the newest sweep. History for
+retired accounts remains stored, but is not presented as current capacity.
+Missing windows for a still-present account retain explicit missing-observation
+states rather than reusing an old valid forecast.
+
 ## Hourly operation
 
 Use `scripts/collect-hourly.sh` with the scheduler's script-only/no-agent mode.

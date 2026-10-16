@@ -84,12 +84,14 @@ def _cache():
 
 def public_snapshot() -> dict[str, Any]:
     """Quota cache with only display fields. Never returns credentials."""
-    cache = _cache().read_quota_cache() or {}
+    module = _cache()
+    cache = module.read_quota_cache() or {}
     providers = cache.get("providers") if isinstance(cache, dict) else {}
     if not isinstance(providers, dict):
         providers = {}
     return {
         "fetched_at": _text(cache.get("fetched_at"), 80) if isinstance(cache, dict) else None,
+        "managed_collection": bool(getattr(module, "managed_collection_enabled", lambda: False)()),
         "providers": {name: _record(record) for name, record in providers.items() if _text(name, 40)},
     }
 
@@ -119,5 +121,7 @@ def quota_status() -> dict[str, Any]:
 
 @router.post("/refresh")
 def quota_refresh() -> dict[str, Any]:
-    _cache().refresh_quota_cache()
+    module = _cache()
+    if not getattr(module, "managed_collection_enabled", lambda: False)():
+        module.refresh_quota_cache()
     return public_snapshot()

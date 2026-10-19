@@ -53,6 +53,78 @@
     );
   }
 
+  function windowMs(label) {
+    var text = String(label || "").toLowerCase();
+    if (text.indexOf("session") >= 0) return 5 * 3600 * 1000;
+    if (text.indexOf("week") >= 0) return 7 * 24 * 3600 * 1000;
+    return null;
+  }
+
+  function pacePoints(forecast, samples) {
+    return (samples || []).filter(function (row) {
+      return row && row.status === "ok" && row.provider === forecast.provider && row.account === forecast.account && row.window === forecast.window && row.reset_at === forecast.reset_at && typeof row.used_percent === "number" && isFinite(row.used_percent);
+    }).map(function (row) {
+      return { t: new Date(row.fetched_at).getTime(), used: Math.max(0, Math.min(100, row.used_percent)) };
+    }).filter(function (point) { return !isNaN(point.t); }).sort(function (a, b) { return a.t - b.t; });
+  }
+
+  function PaceChart(props) {
+    var forecast = props.forecast;
+    var reset = new Date(forecast.reset_at).getTime();
+    var points = pacePoints(forecast, props.samples);
+    if (!forecast.reset_at || isNaN(reset) || points.length < 2) {
+      return h("p", { style: { fontSize: 12 } }, "Not enough samples in this reset window for a pace chart.");
+    }
+    var duration = windowMs(forecast.window);
+    var periodStart = duration ? reset - duration : points[0].t;
+    var latest = points[points.length - 1];
+    var span = reset - periodStart;
+    var targetAt = function (t) {
+      if (span <= 0) return null;
+      return Math.max(0, Math.min(100, 100 * (t - periodStart) / span));
+    };
+    var targetNow = targetAt(latest.t);
+    var verdict = "On target";
+    if (targetNow != null && latest.used > targetNow + 1) verdict = "Above target";
+    else if (targetNow != null && latest.used < targetNow - 1) verdict = "Below target";
+    var width = 640;
+    var height = 150;
+    var left = 36;
+    var right = 12;
+    var top = 12;
+    var bottom = 22;
+    var x0 = Math.min(periodStart, points[0].t);
+    var x1 = reset;
+    if (!(x1 > x0)) {
+      return h("p", { style: { fontSize: 12 } }, "Not enough samples in this reset window for a pace chart.");
+    }
+    var xOf = function (t) { return left + (t - x0) / (x1 - x0) * (width - left - right); };
+    var yOf = function (used) { return top + (100 - used) / 100 * (height - top - bottom); };
+    var actual = points.map(function (point) { return xOf(point.t).toFixed(1) + "," + yOf(point.used).toFixed(1); }).join(" ");
+    var target = xOf(periodStart).toFixed(1) + "," + yOf(0).toFixed(1) + " " + xOf(reset).toFixed(1) + "," + yOf(100).toFixed(1);
+    var trend = null;
+    if (typeof forecast.rate_percentage_points_per_hour === "number" && isFinite(forecast.rate_percentage_points_per_hour)) {
+      var hoursLeft = (reset - latest.t) / 3600000;
+      var projected = Math.max(0, Math.min(100, latest.used + forecast.rate_percentage_points_per_hour * hoursLeft));
+      trend = xOf(latest.t).toFixed(1) + "," + yOf(latest.used).toFixed(1) + " " + xOf(reset).toFixed(1) + "," + yOf(projected).toFixed(1);
+    }
+    var stroke = verdict === "Above target" ? "#b45309" : "var(--ui-accent)";
+    var remain = Math.max(0, 100 - latest.used);
+    var targetRemain = targetNow == null ? null : Math.max(0, 100 - targetNow);
+    return h("div", { style: { marginTop: 8 } },
+      h("div", { style: { fontSize: 13, fontWeight: 600, color: stroke } }, verdict),
+      h("div", { style: { fontSize: 12 } }, remain.toFixed(0) + "% remaining" + (targetRemain == null ? "" : " · even-pace target " + targetRemain.toFixed(0) + "% remaining")),
+      h("svg", { viewBox: "0 0 " + width + " " + height, role: "img", "aria-label": forecast.label + " " + forecast.window + " " + verdict, style: { width: "100%", height: 150, marginTop: 6 } },
+        h("line", { x1: left, y1: yOf(0), x2: width - right, y2: yOf(0), stroke: "var(--ui-stroke-secondary)" }),
+        h("line", { x1: left, y1: yOf(100), x2: width - right, y2: yOf(100), stroke: "var(--ui-stroke-secondary)" }),
+        h("polyline", { points: target, fill: "none", stroke: "var(--ui-text-tertiary)", "stroke-dasharray": "4 4", "stroke-width": 1.5 }),
+        trend ? h("polyline", { points: trend, fill: "none", stroke: stroke, "stroke-dasharray": "2 3", "stroke-width": 1.5 }) : null,
+        h("polyline", { points: actual, fill: "none", stroke: stroke, "stroke-width": 2 })
+      ),
+      h("div", { style: { fontSize: 12, color: "var(--ui-text-tertiary)" } }, "Solid line is observed use. Dashed grey is even pace to reset. Dashed colour is the recent trend extended to reset. Above target means less remaining than an even burn would leave.")
+    );
+  }
+
   function QuotaPage() {
     var state = React.useState({ loading: true, error: "", data: null });
     var snap = state[0];
@@ -112,7 +184,8 @@
             f.reset_at ? h("div", null, "Resets " + when(f.reset_at)) : null,
             estimate == null ? null : h("div", null, "Projected demand: " + estimate.toFixed(1) + "% of quota by reset · " + f.rate_percentage_points_per_hour.toFixed(2) + " percentage points/hour"),
             f.estimated_exhaustion_at ? h("div", null, "Estimated exhaustion at observed pace: " + when(f.estimated_exhaustion_at)) : null,
-            h("div", { style: { fontSize: 12 } }, "Observed " + when(f.fetched_at) + " · " + f.sample_count + " continuous samples")
+            h("div", { style: { fontSize: 12 } }, "Observed " + when(f.fetched_at) + " · " + f.sample_count + " continuous samples"),
+            h(PaceChart, { forecast: f, samples: (hist && hist.samples) || [] })
           );
         }),
       h("h2", { style: { fontSize: 16, marginTop: 20 } }, "Observed daily quota changes (UTC)"),

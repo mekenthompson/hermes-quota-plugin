@@ -470,32 +470,52 @@ def _saved_xai_tokens() -> list[str]:
 
 
 def _oauth_tokens() -> list[str]:
-    """Hermes-owned xai-oauth tokens, read-only. Unexpected resolver errors do not peek another account."""
-    tokens: list[str] = []
-    saved = _saved_xai_tokens()
+    """Hermes-owned xai-oauth tokens.
+
+    Ask the inference resolver to refresh only when its own expiry margin says
+    the grant is expiring. A still-valid token is not refreshed. Re-read the
+    saved store after that call so a pre-refresh snapshot is not reused, and
+    do not put an expired duplicate back beside the renewed token.
+    """
     try:
         from hermes_cli.auth import AuthError
         from hermes_cli.auth_xai import resolve_xai_oauth_runtime_credentials
     except Exception:
-        return saved
+        return _saved_xai_tokens()
     try:
-        creds = resolve_xai_oauth_runtime_credentials(refresh_if_expiring=False)
-        token = str((creds or {}).get("api_key") or "").strip()
-        # Some core versions resolve the old provider snapshot before the pool.
-        # Do not put that expired snapshot back after the saved-token scan
-        # excluded it. Explicit saved entries and resolver-only failure remain.
-        if token and (token in saved or not _stale_duplicate(token, saved)):
-            tokens.append(token)
+        creds = resolve_xai_oauth_runtime_credentials(refresh_if_expiring=True)
     except AuthError:
-        pass
+        saved = _saved_xai_tokens()
+        return _without_stale_duplicates(saved)
     except Exception:
         return []
-    for token in saved:
-        if token not in tokens:
-            tokens.append(token)
+    saved = _saved_xai_tokens()
+    tokens: list[str] = []
+    token = str((creds or {}).get("api_key") or "").strip()
+    # Some core versions resolve the old provider snapshot before the pool.
+    # Do not put that expired snapshot back after the saved-token scan
+    # excluded it. Explicit saved entries and resolver-only failure remain.
+    if token and (token in saved or not _stale_duplicate(token, saved)):
+        tokens.append(token)
+    for item in saved:
+        if item not in tokens:
+            tokens.append(item)
         if len(tokens) >= _MAX_OAUTH_ACCOUNTS:
             break
-    return tokens[:_MAX_OAUTH_ACCOUNTS]
+    return _without_stale_duplicates(tokens)
+
+
+def _without_stale_duplicates(tokens: list[str]) -> list[str]:
+    kept: list[str] = []
+    for token in tokens:
+        others = [item for item in tokens if item != token]
+        if _stale_duplicate(token, others + kept):
+            continue
+        if token not in kept:
+            kept.append(token)
+        if len(kept) >= _MAX_OAUTH_ACCOUNTS:
+            break
+    return kept
 
 
 def _oauth_get(url: str, token: str) -> tuple[Optional[dict], Optional[str]]:

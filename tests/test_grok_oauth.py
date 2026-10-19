@@ -131,7 +131,26 @@ class GrokOAuthTests(unittest.TestCase):
         }), mock.patch.object(grok, "_saved_xai_tokens", return_value=[live]), \
              mock.patch("time.time", return_value=100):
             self.assertEqual(grok._oauth_tokens(), [live])
-        resolver.assert_called_once_with(refresh_if_expiring=False)
+        resolver.assert_called_once_with(refresh_if_expiring=True)
+
+    def test_expiring_grant_uses_refreshed_token_not_the_saved_snapshot(self):
+        def jwt(exp, subject="synthetic-shared"):
+            payload = base64.urlsafe_b64encode(json.dumps({"exp": exp, "sub": subject}).encode()).decode().rstrip("=")
+            return f"header.{payload}.signature"
+
+        fresh, expired = jwt(200), jwt(50)
+        auth = types.ModuleType("hermes_cli.auth")
+        setattr(auth, "AuthError", type("AuthError", (Exception,), {}))
+        xai = types.ModuleType("hermes_cli.auth_xai")
+        resolver = mock.Mock(return_value={"api_key": fresh})
+        setattr(xai, "resolve_xai_oauth_runtime_credentials", resolver)
+        parent = types.ModuleType("hermes_cli")
+        with mock.patch.dict("sys.modules", {
+            "hermes_cli": parent, "hermes_cli.auth": auth, "hermes_cli.auth_xai": xai,
+        }), mock.patch.object(grok, "_saved_xai_tokens", return_value=[expired]), \
+             mock.patch("time.time", return_value=100):
+            self.assertEqual(grok._oauth_tokens(), [fresh])
+        resolver.assert_called_once_with(refresh_if_expiring=True)
 
     def test_subscription_percent_ignores_on_demand_and_prepaid(self):
         def opener(request, timeout):

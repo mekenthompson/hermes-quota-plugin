@@ -3,7 +3,7 @@
   "label": "Quota",
   "description": "Subscription allowance remaining for the OAuth accounts this profile can read.",
   "icon": "Gauge",
-  "version": "2.10.0",
+  "version": "2.10.2",
   "tab": {
     "path": "/quota",
     "position": "after:sessions"

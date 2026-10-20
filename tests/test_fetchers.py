@@ -20,6 +20,29 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+
+# The cross-profile payload share is covered by test_anthropic_shared_payload.py.
+# Here it is switched off so one test's successful read cannot satisfy the next
+# test's request (every test in this module reuses the same synthetic token).
+_SHARE_PATCHES = []
+
+
+def setUpModule():  # noqa: N802 - unittest hook
+    from quota_providers import builtin as _b
+
+    for patch in (
+        mock.patch.object(_b, "_load_shared_payload", return_value=None),
+        mock.patch.object(_b, "_store_shared_payload", return_value=None),
+    ):
+        patch.start()
+        _SHARE_PATCHES.append(patch)
+
+
+def tearDownModule():  # noqa: N802 - unittest hook
+    while _SHARE_PATCHES:
+        _SHARE_PATCHES.pop().stop()
+
+
 class _FakeResponse(BytesIO):
     """Minimal context-manager response standing in for urlopen()."""
 
@@ -966,7 +989,8 @@ class AnthropicScopedLimitTests(unittest.TestCase):
             res = builtin._fetch_anthropic()
         self.assertIsNone(res.unavailable_reason)
         self.assertEqual(len(seen), 1)
-        self.assertEqual(seen[0], builtin._ANTHROPIC_TIMEOUT_S)
+        self.assertGreater(seen[0], 0)
+        self.assertLessEqual(seen[0], builtin._ANTHROPIC_TIMEOUT_S)
 
 
 

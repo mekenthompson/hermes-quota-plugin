@@ -51,7 +51,9 @@ def _format_quota_block(quota_cache: dict[str, Any]) -> str:
             except (TypeError, ValueError):
                 rem = "?"
             win_strs.append(f"{wlabel} {rem}%" + (f" (reset {tail})" if tail else ""))
-        segs.append(f"• {label}: " + " · ".join(win_strs))
+        observation = [d for d in rec.get("details", [])
+                       if isinstance(d, str) and d.startswith("Observed ")]
+        segs.append(f"• {label}: " + " · ".join(win_strs + observation))
     return "\n".join(segs)
 
 

@@ -51,7 +51,7 @@ const ID = "quota";
 // gateway, so the two halves can really be different builds. `tests/test_widget_version.py`
 // fails when they drift; a mismatch found at runtime is surfaced in the pane
 // instead of looking like a broken feature.
-const WIDGET_VERSION = "2.10.0";
+const WIDGET_VERSION = "2.10.2";
 
 // Module-level ctx handle (set in register). The data hook below needs it.
 let CTX = null;
@@ -1235,15 +1235,16 @@ function statusEntries(providers, stale = false) {
 		// A lone account needs no distinguishing name in the compact status bar.
 		// Preserve the original OpenAI Codex headline even with a saved label.
 		if (accounts.length === 1) accounts[0] = { ...accounts[0], account_label: "" };
-		const selected = (stale ? null : accounts.find((a) => codexRemaining(a) !== 0)) || accounts[0];
-		return [pid, { ...selected, display_selected_index: accounts.indexOf(selected), display_accounts: accounts, display_stale: stale, display_remaining: stale ? null : codexRemaining(selected) }];
+		const selected = accounts.find((a) => codexRemaining(a) !== 0) || accounts[0];
+		// Preserve cached display selection without ranking stale quota as fresh.
+		return [pid, { ...selected, display_selected_index: accounts.indexOf(selected), display_accounts: accounts, display_stale: stale, display_cached_remaining: codexRemaining(selected), display_remaining: stale ? null : codexRemaining(selected) }];
 	});
 }
 
 function codexAccountsTip(provider) {
 	const lines = [];
 	for (const [index, account] of provider.display_accounts.entries()) {
-		const remaining = provider.display_stale ? null : codexRemaining(account);
+		const remaining = codexRemaining(account);
 		const marker = index === provider.display_selected_index ? "●" : "○";
 		const error = account.unavailable_reason ? ` · ${account.unavailable_reason}` : "";
 		const value = codexValue(remaining) + (remaining > 0 ? " left" : "");
@@ -1265,10 +1266,12 @@ function codexAccountsTip(provider) {
 }
 
 function ProviderChip({ pid, provider }) {
-	const r = provider && provider.unavailable_reason ? null : provider?.display_accounts ? provider.display_remaining : worstWindow(provider);
+	const cachedRemaining = provider?.display_stale ? provider.display_cached_remaining : provider?.display_remaining;
+	const r = provider && provider.unavailable_reason ? null : provider?.display_accounts ? cachedRemaining : worstWindow(provider);
+	const staleValue = Boolean(provider?.display_accounts && provider.display_stale && r != null);
 	const facts = accountFacts(provider);
 	const value = provider?.display_accounts ? codexValue(r) : provider && provider.unavailable_reason ? "unavailable" : r != null ? `${r}%` : facts.balances.length ? facts.balances.map(balanceText).join(" · ") : facts.available === true ? "available" : facts.available === false ? "unavailable" : "—";
-	const tone = provider?.display_accounts ? toneForRemaining(r) : providerTone(provider);
+	const tone = provider?.display_accounts ? (provider.display_stale ? "muted" : toneForRemaining(r)) : providerTone(provider);
 	const dot = toneColor(tone);
 	const label = providerDisplayName(pid, provider);
 	const tip = makeProviderTip(pid, provider);
@@ -1276,7 +1279,7 @@ function ProviderChip({ pid, provider }) {
 		"button",
 		{
 			type: "button",
-			"aria-label": `${label} ${value} · Open Quota pane`,
+			"aria-label": `${label} ${value}${staleValue ? " · stale" : ""} · Open Quota pane`,
 			className: cn(
 				"inline-flex h-full items-center gap-1 px-1.5 text-[0.6875rem]",
 				"text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover) hover:text-foreground transition-colors",
@@ -1287,7 +1290,7 @@ function ProviderChip({ pid, provider }) {
 			children: [
 				jsx("span", { className: "inline-block h-1.5 w-1.5 rounded-full", style: { background: dot } }),
 				jsx("span", { children: label }),
-				jsx("span", { className: "tabular-nums", children: value }),
+				jsx("span", { className: "tabular-nums", style: staleValue ? { textDecoration: "line-through" } : undefined, children: value }),
 			],
 		},
 	);
@@ -1541,8 +1544,7 @@ function ProviderRow({ id, provider }) {
 					`${id}-w-${i}`,
 				);
 			}),
-			...(dense || id === "openrouter"
-				? details.filter((d) => facts.available == null || !/^API calls available: (yes|no)$/.test(d)).map((d, i) =>
+			...details.filter((d) => (dense || id === "openrouter" || (baseProviderId(id) === "anthropic" && /^Observed /.test(d))) && (facts.available == null || !/^API calls available: (yes|no)$/.test(d))).map((d, i) =>
 						jsx(
 							"div",
 							{
@@ -1551,8 +1553,7 @@ function ProviderRow({ id, provider }) {
 							},
 							`${id}-d-${i}`,
 						),
-					)
-				: []),
+				),
 		],
 	});
 }

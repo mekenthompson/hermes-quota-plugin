@@ -510,8 +510,11 @@ class CodexWidgetTests(unittest.TestCase):
                 tree = render(component='status', statusMode=mode, data=data, **flags)
                 chips = [n for n in nodes(tree) if n.get('type') == 'button']
                 self.assertEqual(len(chips), 1)
-                self.assertIn('Account 1', text(chips[0]))
-                self.assertIn('unknown', text(chips[0]))
+                self.assertIn('Account 2', text(chips[0]))
+                self.assertIn('58%', text(chips[0]))
+                value = next(n for n in nodes(chips[0]) if n.get('props', {}).get('className') == 'tabular-nums')
+                self.assertEqual(value['props']['style']['textDecoration'], 'line-through')
+                self.assertIn('stale', chips[0]['props']['aria-label'])
                 self.assertIn('Account 2', tooltip_text(tree))
 
 
@@ -530,7 +533,7 @@ class CodexWidgetTests(unittest.TestCase):
                 self.assertIn(expected, text(chips[0]))
                 self.assertNotIn('Spark', tooltip_text(tree))
 
-    def test_stale_or_missing_age_blocks_fallback_until_fresh(self):
+    def test_stale_or_missing_age_marks_cached_selection_until_fresh(self):
         from widget_harness import render, text, nodes, tooltip_text
         accounts = [{'windows': [{'label': 'Session', 'used_percent': 100}]},
                     {'windows': [{'label': 'Session', 'used_percent': 42}]}]
@@ -541,10 +544,13 @@ class CodexWidgetTests(unittest.TestCase):
                     data = {'age_s': age, 'providers': {'openai-codex': {'accounts': accounts}}}
                     tree = render(component='status', statusMode=mode, data=data)
                     chip = next(n for n in nodes(tree) if n.get('type') == 'button')
-                    self.assertIn('Account 1', text(chip))
-                    self.assertIn('unknown', text(chip))
+                    self.assertIn('Account 2', text(chip))
+                    self.assertIn('58%', text(chip))
+                    value = next(n for n in nodes(chip) if n.get('props', {}).get('className') == 'tabular-nums')
+                    self.assertEqual(value['props']['style']['textDecoration'], 'line-through')
                     self.assertIn('stale', tooltip_text(tree).lower())
-                    self.assertTrue(tooltip_text(tree).startswith('● Account 1 · unknown · stale'))
+                    self.assertTrue(tooltip_text(tree).startswith('○ Account 1 · limit reached · stale'))
+                    self.assertIn('● Account 2 · 58% left · stale', tooltip_text(tree))
                     self.assertIn('Account 2', tooltip_text(tree))
 
 

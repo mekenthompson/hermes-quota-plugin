@@ -50,6 +50,38 @@ def _connect(path):
     return db
 
 
+# Monetary display is a separate allowlist, not arbitrary provider detail text.
+# Keep this exchange contract in sync with the shared-account collector.
+def sanitize_openrouter_display(raw):
+    out = {"details": [], "account_balances": []}
+    if raw.get("unavailable_reason"):
+        return out
+    key = r"Key [1-9][0-9]{0,2} \((?:native|saved|environment)\)"
+    amount = r"-?[0-9]{1,16}(?:\.[0-9]{1,15})?"
+    patterns = (
+        rf"{key}: usage (?:total|today UTC|this week UTC|this month UTC) USD {amount}",
+        rf"{key}: no key-specific cap \(account wallet still applies\)",
+        rf"Account wallet via {key}: USD {amount} remaining \(shared account credits, shown once; not summed across keys\)",
+        r"Account membership of other keys is unverified; wallet is not a total across accounts",
+    )
+    details = raw.get("details")
+    for line in details[:64] if isinstance(details, list) else []:
+        if isinstance(line, str) and len(line) <= 240 and any(re.fullmatch(p, line) for p in patterns):
+            out["details"].append(line)
+            if len(out["details"]) >= 32:
+                break
+    balances = raw.get("account_balances")
+    for row in balances[:8] if isinstance(balances, list) else []:
+        if not isinstance(row, dict) or row.get("currency") != "USD":
+            continue
+        value = row.get("total_balance")
+        if (isinstance(value, str) and len(value) <= 32 and re.fullmatch(amount, value)
+                and abs(float(value)) <= 1e15):
+            out["account_balances"].append({"currency": "USD", "total_balance": value})
+            break  # One representative wallet, never a sum across local keys.
+    return out
+
+
 def sanitize_snapshot(snapshot):
     """Allowlisted quota-only exchange format, never credential/raw payload data."""
     if not isinstance(snapshot, dict) or not _stamp(snapshot.get("fetched_at")):
@@ -95,6 +127,8 @@ def sanitize_snapshot(snapshot):
         if not isinstance(key, str) or not re.fullmatch(r"[a-z0-9][a-z0-9:._-]{0,79}", key):
             raise ValueError("invalid snapshot provider key")
         out[key] = record(value)
+        if key == "openrouter":
+            out[key].update(sanitize_openrouter_display(value))
     return {"fetched_at": _stamp(snapshot["fetched_at"]), "providers": out}
 
 

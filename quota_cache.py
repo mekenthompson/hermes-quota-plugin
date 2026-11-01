@@ -169,22 +169,33 @@ def _result_to_record(res: QuotaResult) -> dict[str, Any]:
         ],
         "api_calls_available": res.api_calls_available,
         "windows": [
-            {"label": w.label, "used_percent": w.used_percent, "reset_at": w.reset_at}
+            {"label": w.label, "used_percent": w.used_percent, "reset_at": w.reset_at,
+                     **({"duration_seconds": w.duration_seconds} if w.duration_seconds is not None else {})}
             for w in res.windows
         ],
     }
     if res.account_label:
         record["account_label"] = res.account_label
+    if res.history_id:
+        record["history_id"] = res.history_id
+    if res.observed_at:
+        record["observed_at"] = res.observed_at
+    if res.stale:
+        record["stale"] = True
     if res.accounts:
         record["accounts"] = [
             ({
                 "id": account.id,
+                "history_id": account.history_id,
+                "observed_at": account.observed_at,
+                "stale": account.stale,
                 "label": account.label,
                 "plan": account.plan,
                 "unavailable_reason": account.unavailable_reason,
                 "details": list(account.details or []),
                 "windows": [
-                    {"label": w.label, "used_percent": w.used_percent, "reset_at": w.reset_at}
+                    {"label": w.label, "used_percent": w.used_percent, "reset_at": w.reset_at,
+                     **({"duration_seconds": w.duration_seconds} if w.duration_seconds is not None else {})}
                     for w in account.windows
                 ],
             } if isinstance(account, QuotaAccount) else _result_to_record(account))
@@ -257,6 +268,9 @@ def _expand_accounts(provider_id: str, record: Any) -> dict[str, Any]:
             "provider": provider_id,
             "account_id": account_id.strip() if isinstance(account_id, str) and account_id.strip() else None,
             "account_label": account_label,
+            "history_id": account.get("history_id"),
+            "observed_at": account.get("observed_at"),
+            "stale": bool(account.get("stale")),
             "plan": account.get("plan"),
             "unavailable_reason": reason if isinstance(reason, str) and reason else None,
             "details": [str(d) for d in details] if isinstance(details, list) else [],
@@ -352,7 +366,17 @@ def _fetch_one(provider_id: str, fetcher: Any) -> dict[str, Any]:
         return _unavailable_record(provider_id, "fetch-error")
 
 
-def refresh_quota_cache(*, budget: Optional[float] = None) -> dict[str, Any]:
+def managed_collection_enabled() -> bool:
+    """Collector ownership prevents a local refresh replacing shared observations."""
+    try:
+        from hermes_cli.config import load_config_readonly
+        config = load_config_readonly() or {}
+        return config.get("plugins", {}).get("entries", {}).get("quota", {}).get("settings", {}).get("managedCollection") is True
+    except Exception:
+        return False
+
+
+def refresh_quota_cache(*, budget: Optional[float] = None, provider_ids=None, persist=True) -> dict[str, Any]:
     """Run every registered provider fetcher concurrently and write the cache.
 
     Bounded by ``budget`` seconds (``REFRESH_BUDGET_S`` default) and run on
@@ -363,9 +387,15 @@ def refresh_quota_cache(*, budget: Optional[float] = None) -> dict[str, Any]:
     leaves an ``unavailable_reason`` record rather than aborting the sweep.
     Returns the cache dict that was written.
     """
+    if persist and managed_collection_enabled():
+        raise ValueError("quota view is collector-managed; use sample/ingest instead of local refresh")
     budget_s = REFRESH_BUDGET_S if budget is None else max(0.0, float(budget))
     previous_special = read_quota_cache().get("codex_special_reset")
     items = list(PROVIDER_FETCHERS.items())
+    if provider_ids is not None:
+        if not provider_ids or any(pid not in PROVIDER_FETCHERS for pid in provider_ids):
+            raise ValueError("unknown or empty quota provider selection")
+        items = [(pid, fetcher) for pid, fetcher in items if pid in set(provider_ids)]
     results: dict[str, Any] = {}
     lock = threading.Lock()
     deadline = time.monotonic() + budget_s
@@ -405,6 +435,8 @@ def refresh_quota_cache(*, budget: Optional[float] = None) -> dict[str, Any]:
 
     def _special_worker() -> None:
         try:
+            if not persist:
+                return  # quota-only representative sampling has no announcement writes
             codex_done = events.get("openai-codex")
             if codex_done is None:
                 special_result["entry"] = codex_special_reset.empty_entry(
@@ -438,7 +470,7 @@ def refresh_quota_cache(*, budget: Optional[float] = None) -> dict[str, Any]:
         # previous record forward, marked so the display never presents it as
         # current.
         swept = {provider_id for provider_id, _fetcher in items}
-        previous_providers = read_quota_cache().get("providers") or {}
+        previous_providers = (read_quota_cache().get("providers") or {}) if persist else {}
         orphans = [key for key in previous_providers
                    if str(key).split(":", 1)[0] not in swept]
         for key in orphans:
@@ -475,6 +507,9 @@ def refresh_quota_cache(*, budget: Optional[float] = None) -> dict[str, Any]:
         # instead of trusting the process TZ they happen to run under.
         "timezone": timezone_name(),
     }
+
+    if not persist:
+        return cache
 
     try:
         with _CACHE_LOCK:
@@ -515,6 +550,32 @@ def _record_history(cache: dict[str, Any]) -> None:
         monitor_quotas.record_from_cache(cache, home=os.path.dirname(_cache_path()))
     except Exception:
         logger.debug("quota_cache ▸ history record failed", exc_info=True)
+
+
+def ingest_snapshot(snapshot):
+    """Commit sanitized shared observations to the canonical ledger and view."""
+    from .quota_history import sanitize_snapshot, record_snapshot
+    from pathlib import Path
+    clean = sanitize_snapshot(snapshot)
+    with _CACHE_LOCK:
+        previous = read_quota_cache().get("fetched_at")
+        if previous and datetime.fromisoformat(clean["fetched_at"]) < datetime.fromisoformat(previous.replace("Z", "+00:00")):
+            raise ValueError("refusing to replace newer quota cache with older snapshot")
+        path = Path(_cache_path())
+        if path.is_symlink():
+            raise ValueError("quota cache path must not be a symlink")
+        record_snapshot(clean)
+        fd, temp = tempfile.mkstemp(prefix=".quota-ingest-", dir=str(path.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(clean, stream, sort_keys=True)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temp, path)
+        finally:
+            if os.path.exists(temp):
+                os.unlink(temp)
+    return clean
 
 
 def is_fresh() -> bool:

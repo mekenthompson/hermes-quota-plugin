@@ -1,0 +1,4 @@
+# Test-only dependencies for real HTTP redirect and browser-cookie safety tests.
+# Versions match the locally verified test environment; both support Python 3.9.
+httpx==0.28.1
+cryptography==50.0.1

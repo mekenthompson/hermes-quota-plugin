@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .quota_cache import (
+    managed_collection_enabled,
     iter_account_records,
     local_tz,
     read_quota_cache,
@@ -444,6 +445,14 @@ def _render_quota_json() -> str:
             cache.get("codex_special_reset")),
     }
     out.update(_plugin_stamp())
+    if managed_collection_enabled():
+        from .quota_history import read_history, forecasts, completed_weeks
+        out["managed_collection"] = True
+        try:
+            rows = read_history(days=90)
+            out["canonical_history"] = {"forecasts": forecasts(rows), "weeks": completed_weeks(rows)}
+        except Exception:
+            out["canonical_history"] = {"error": "history-unavailable"}
     return json.dumps(out, indent=2, sort_keys=True)
 
 
@@ -501,6 +510,17 @@ def setup_argparse(subparser):
         action="store_true",
         help="Never refresh: emit the cache as-is (desktop widget poll path)",
     )
+    sample = subs.add_parser("sample", help="Fetch selected providers as sanitized JSON without changing cache/history")
+    sample.add_argument("--provider", action="append", required=True, choices=_PROVIDER_IDS)
+    subs.add_parser("ingest", help="Read a sanitized quota sweep from stdin (no vendor calls)")
+    forecast = subs.add_parser("forecast", help="Shared-account estimates from canonical observations")
+    forecast.add_argument("--json", action="store_true")
+    forecast.add_argument("--provider", default=None)
+    subs.add_parser("collect", help="Durably store one local observation (silent on success)")
+    hist = subs.add_parser("history", help="Read canonical quota observations")
+    hist.add_argument("--json", action="store_true")
+    hist.add_argument("--days", type=int, default=30)
+    hist.add_argument("--provider", default=None)
     subs.add_parser("refresh", help="Force a re-fetch of all providers")
     prov = subs.add_parser("provider", help="Show quota for one provider")
     prov.add_argument("name", help="provider id, e.g. anthropic, grok, openai-codex")
@@ -578,6 +598,40 @@ def _handle_monitor(args) -> int:
 
 def _handle_cli(args):
     cmd = getattr(args, "quota_command", None) or "status"
+    if cmd == "sample":
+        from .quota_history import sanitize_snapshot
+        snapshot = refresh_quota_cache(provider_ids=args.provider, persist=False)
+        print(json.dumps(sanitize_snapshot(snapshot), sort_keys=True))
+        return
+    if cmd == "ingest":
+        from .quota_cache import ingest_snapshot
+        raw = sys.stdin.read(1024 * 1024 + 1)
+        if len(raw) > 1024 * 1024:
+            raise ValueError("quota snapshot exceeds 1 MiB input limit")
+        ingest_snapshot(json.loads(raw))
+        return
+    if cmd == "forecast":
+        from .quota_history import read_history, forecasts
+        values = forecasts(read_history(days=2, provider=getattr(args, "provider", None)))
+        if getattr(args, "json", False):
+            print(json.dumps({"forecasts": values}, sort_keys=True))
+        else:
+            print("Shared-account quota estimates assume recent observed pace continues.")
+            for row in values:
+                print(f"{row['label']} · {row['window']}: {row['status']}")
+        return
+    if cmd == "collect":
+        from .quota_history import record_snapshot
+        record_snapshot(refresh_quota_cache())
+        return
+    if cmd == "history":
+        from .quota_history import read_history, daily_changes
+        rows = read_history(days=getattr(args, "days", 30), provider=getattr(args, "provider", None))
+        if getattr(args, "json", False):
+            print(json.dumps({"samples": rows, "daily_changes": daily_changes(rows)}, sort_keys=True))
+        else:
+            print(f"Quota history: {len(rows)} observations. Daily changes are sampled deltas, not API daily usage.")
+        return
     if cmd == "monitor":
         return _handle_monitor(args)
     if cmd == "refresh":

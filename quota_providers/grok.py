@@ -456,4 +456,6 @@ def _fetch_grok_optin() -> Optional["QuotaResult"]:
     return fetch_grok_quota()
 
 
-_register("grok")(_fetch_grok_optin)
+# Preserve the CLI subscription pool; grok.com credit/model pools are not equivalent.
+from .grok_cli import _fetch_grok_registered
+_register("grok")(_fetch_grok_registered)

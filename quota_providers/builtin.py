@@ -602,6 +602,28 @@ def _request_anthropic_usage_locked(
     return payload, None
 
 
+def _claude_history_identity(token: str, *, timeout: float) -> Optional[str]:
+    """Hash the same-token authenticated account and organization, never local hints."""
+    if timeout <= 0:
+        return None
+    request = urllib.request.Request(
+        "https://api.anthropic.com/api/oauth/profile",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json",
+                 "User-Agent": "hermes-quota-plugin/3.0.0"}, method="GET")
+    try:
+        import uuid
+        with urlopen_no_redirect(request, timeout=min(timeout, 3.0)) as response:
+            body = response.read(_MAX_HTTP_BYTES + 1)
+        if len(body) > _MAX_HTTP_BYTES:
+            return None
+        payload = json.loads(body)
+        account = str(uuid.UUID(payload.get("account", {}).get("uuid")))
+        organization = str(uuid.UUID(payload.get("organization", {}).get("uuid")))
+        return hashlib.sha256(json.dumps(["anthropic", account, organization], separators=(",", ":")).encode()).hexdigest()
+    except Exception:
+        return None
+
+
 def _anthropic_usage_payload() -> tuple[Optional[dict[str, Any]], Optional[str]]:
     """Fetch the OAuth usage payload once for the core-resolved account."""
     token = _core_anthropic_token()
@@ -648,6 +670,7 @@ def _parse_anthropic_usage(payload: dict[str, Any]) -> tuple[list[QuotaWindow], 
             label=label,
             used_percent=max(0.0, min(100.0, used)),
             reset_at=reset if isinstance(reset, str) and reset else None,
+            duration_seconds=18000 if key == "five_hour" else 604800,
         ))
 
     for window in parse_anthropic_scoped_limits(payload):
@@ -814,6 +837,7 @@ def _claude_accounts_setting() -> tuple[list[dict[str, Any]], bool]:
             "id": account_id,
             "label": label.strip() if isinstance(label, str) and label.strip() else account_id,
             "config_dir": config_dir.strip(),
+            **({"verify_history_identity": True} if item.get("verifyHistoryIdentity") is True else {}),
         })
     if truncated:
         out.append({
@@ -934,6 +958,7 @@ def _claude_account_results(
     *,
     primary_token: Optional[str],
     deadline: Deadline,
+    primary_result: Optional[QuotaResult] = None,
 ) -> list[QuotaAccount]:
     """Fetch every configured extra account under one shared deadline.
 
@@ -989,6 +1014,11 @@ def _claude_account_results(
             continue
         fingerprint = _token_fingerprint(token)
         if fingerprint in seen_tokens:
+            if (primary_result is not None and fingerprint == primary_fp
+                    and not primary_result.unavailable_reason
+                    and not primary_result.history_id
+                    and entry.get("verify_history_identity") is True):
+                primary_result.history_id = _claude_history_identity(token, timeout=deadline.slice(3.0))
             continue
         seen_tokens.add(fingerprint)
         payload, reason = _request_anthropic_usage(
@@ -1002,9 +1032,12 @@ def _claude_account_results(
             accounts.append(QuotaAccount(id=entry["id"], label=entry["label"],
                                          unavailable_reason="no-data"))
             continue
+        history_id = (_claude_history_identity(token, timeout=deadline.slice(3.0))
+                      if entry.get("verify_history_identity") is True else None)
         accounts.append(QuotaAccount(id=entry["id"], label=entry["label"],
                                      plan=_claude_subscription_type(str(account_dir)),
-                                     windows=windows, details=details))
+                                     windows=windows, details=details, history_id=history_id,
+                                     **_anthropic_observation(payload)))
     if overflow:
         accounts.append(QuotaAccount(
             id=f"{GENERATED_ACCOUNT_ID_PREFIX}limit",
@@ -1012,6 +1045,14 @@ def _claude_account_results(
             unavailable_reason=_CLAUDE_LIMIT_REASON,
             details=[_ACCOUNT_LIMIT_DETAIL]))
     return accounts
+
+
+def _anthropic_observation(payload):
+    from datetime import datetime, timezone
+    if isinstance(payload, _ObservedAnthropicPayload):
+        return {"observed_at": datetime.fromtimestamp(payload.observed_at, timezone.utc).isoformat(),
+                "stale": payload.stale}
+    return {"observed_at": datetime.now(timezone.utc).isoformat(), "stale": False}
 
 
 def _fetch_anthropic_single() -> QuotaResult:
@@ -1034,6 +1075,7 @@ def _fetch_anthropic_single() -> QuotaResult:
         plan=None,
         unavailable_reason=None,
         details=details,
+        **_anthropic_observation(payload),
     )
 
 
@@ -1055,13 +1097,14 @@ def _fetch_anthropic_multi(entries: list[dict[str, Any]]) -> QuotaResult:
         else:
             windows, details = _parse_anthropic_usage(payload)
             if windows or details:
-                primary = QuotaResult(label="anthropic", windows=windows, details=details)
+                primary = QuotaResult(label="anthropic", windows=windows, details=details,
+                                      **_anthropic_observation(payload))
             else:
                 primary_reason = "no-data"
 
     result = primary or build_unavailable("anthropic", primary_reason or "no-data")
     result.accounts = _claude_account_results(
-        entries, primary_token=token, deadline=deadline)
+        entries, primary_token=token, deadline=deadline, primary_result=result)
     return result
 
 
@@ -1304,6 +1347,10 @@ def _parse_codex_payload(payload: dict) -> QuotaResult:
             label=label,
             used_percent=used_percent,
             reset_at=_iso(raw.get("reset_at")),
+            duration_seconds=(raw["limit_window_seconds"]
+                if isinstance(raw.get("limit_window_seconds"), int)
+                and not isinstance(raw.get("limit_window_seconds"), bool)
+                and 0 < raw["limit_window_seconds"] <= 31536000 else None),
         )
 
     windows: list[QuotaWindow] = []

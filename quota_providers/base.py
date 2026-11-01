@@ -33,6 +33,7 @@ class QuotaWindow:
     label: str
     used_percent: Optional[float] = None  # provider-reported *used* fraction 0..100
     reset_at: Optional[str] = None  # ISO-8601 UTC timestamp
+    duration_seconds: Optional[int] = None  # vendor-declared, never inferred from label
 
     def remaining_pct(self) -> Optional[int]:
         if self.used_percent is None:
@@ -75,6 +76,9 @@ class QuotaAccount:
     plan: Optional[str] = None
     unavailable_reason: Optional[str] = None
     details: list[str] = field(default_factory=list)
+    history_id: Optional[str] = None
+    observed_at: Optional[str] = None
+    stale: bool = False
 
     def has_data(self) -> bool:
         return (bool(self.windows) or bool(self.details)) and self.unavailable_reason is None
@@ -105,6 +109,9 @@ class QuotaResult:
     accounts: list[Union[QuotaAccount, QuotaResult]] = field(default_factory=list)
     # Explicit label for legacy single-account provider records (Codex).
     account_label: Optional[str] = None
+    history_id: Optional[str] = None
+    observed_at: Optional[str] = None
+    stale: bool = False
 
     def has_data(self) -> bool:
         return (

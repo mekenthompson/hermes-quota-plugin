@@ -2552,6 +2552,30 @@ function IconButton({ title, onClick, disabled, children }) {
 	});
 }
 
+function CanonicalHistory({ data }) {
+	const history = data?.canonical_history;
+	if (!data?.managed_collection || !history) return null;
+	const weeks = history.weeks || {};
+	return jsxs("details", {
+		style: { ...UI.col, ...UI.meta, gap: 6 },
+		children: [
+			jsx("summary", { children: "Shared-account history" }),
+			jsx("div", { children: "Hourly observations across all clients. Forecasts assume recent pace; unknown history is not reconstructed." }),
+			history.error ? jsx("div", { children: "History unavailable" }) : null,
+			...(history.forecasts || []).map((r) => jsx("div", {
+				children: `${r.label} · ${r.window}: ${r.status}${r.reset_at ? ` · reset ${r.reset_at}` : ""}${r.rate_percentage_points_per_hour != null ? ` · ${Number(r.rate_percentage_points_per_hour).toFixed(2)} percentage points/hour` : ""}`,
+			}, `${r.provider}:${r.account}:${r.window}`)),
+			!(weeks.averages || []).length ? jsx("div", { children: "No eligible completed weeks" }) : null,
+			...(weeks.averages || []).map((r) => jsx("div", {
+				children: `${r.provider} · ${(r.account || "").slice(0, 8)} · ${r.window} · ${r.plan || "unknown plan"}: ${Number(r.average_used_percent).toFixed(1)}% observed, ${r.completed_cycles} completed weeks`,
+			}, `${r.provider}:${r.account}:${r.window}:${r.plan}`)),
+			...(weeks.cycles || []).slice(-12).map((r) => jsx("div", {
+				children: `${r.provider} · ${r.window} · ${r.reset_at}: ${Math.round(Number(r.coverage) * 100)}% coverage${r.partial ? " · partial" : ""}${r.saturated ? " · saturated" : ""}${r.discontinuity ? " · discontinuity" : ""}${r.failed ? " · unavailable samples" : ""}`,
+			}, `${r.provider}:${r.account}:${r.window}:${r.reset_at}`)),
+		],
+	});
+}
+
 function QuotaPane({ page = false } = {}) {
 	const t = useQT();
 	const qc = useQueryClient();
@@ -2701,6 +2725,7 @@ function QuotaPane({ page = false } = {}) {
 						)
 					: null,
 				mon.snapshot ? jsx(AccountHints, { providers: data.providers }, "account-hints") : null,
+				jsx(CanonicalHistory, { data }, "canonical-history"),
 				...visible.map((group, index) => {
 					if (group.entries.length >= 2) {
 						return jsx(ProviderCardGroup, {

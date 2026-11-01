@@ -54,6 +54,16 @@ const calls = [];
 let focusedOwner = { connectionId: "remote-a", profile: "shared" };
 let hangRoutes = false;
 let releaseRoutes = null;
+let profileRoutesCalls = 0;
+let hangLive = false;
+let releaseLive = null;
+let liveError = null;
+let unhandledRejections = 0;
+process.on("unhandledRejection", () => {
+  unhandledRejections += 1;
+});
+const liveCalls = [];
+let activeProfile = "shared";
 let routes = [
   { connectionId: "local", profile: "default", targetProfile: "default", mode: "local" },
   { connectionId: "remote-a", profile: "shared", targetProfile: "shared", mode: "remote" },
@@ -64,15 +74,31 @@ let nextResult = { code: 0, output: "{}" };
 const host = {
   state: {
     focusedSessionOwner: { get: () => focusedOwner },
+    profile: { get: () => activeProfile },
   },
-  profileRoutes: () => hangRoutes
-    ? new Promise((resolve) => { releaseRoutes = () => resolve(routes); })
-    : Promise.resolve(routes),
+  profileRoutes: () => {
+    profileRoutesCalls += 1;
+    return hangRoutes
+      ? new Promise((resolve) => { releaseRoutes = () => resolve(routes); })
+      : Promise.resolve(routes);
+  },
   requestProfile: async (route, method, params, timeoutMs, options) => {
     calls.push({ route, method, params, timeoutMs, options });
     return nextResult;
   },
-  request: async () => { throw new Error("ambient host.request must not be used"); },
+  request: async (method, params) => {
+    liveCalls.push({ method, params });
+    if (hangLive) {
+      return new Promise((resolve, reject) => {
+        releaseLive = (error) => {
+          if (error) reject(error);
+          else resolve({ code: 0, output: "{}" });
+        };
+      });
+    }
+    if (liveError) throw liveError;
+    return { code: 0, output: "{}" };
+  },
 };
 const CTX = {
   storage: {
@@ -215,6 +241,56 @@ const makeUseQuota = new Function(
     nullOwnerFailure = String(error && error.message || error);
   }
 
+  // Issue #79: a legacy single connection reports an owner without a registry
+  // connectionId. It must use the live gateway; a null owner must stay disabled.
+  const nullScope = api.normalizeQuotaScope(null);
+  const legacyOwner = { connectionId: "", profile: "default" };
+  const legacyScope = api.normalizeQuotaScope(legacyOwner);
+  const legacyRoutesBefore = profileRoutesCalls;
+  const legacyRequestProfileBefore = calls.length;
+  const legacyLiveBefore = liveCalls.length;
+  const legacyResult = await api.quotaCli(
+    legacyScope,
+    ["quota", "status", "--json", "--cached"],
+  );
+  const legacyCall = liveCalls[legacyLiveBefore];
+  const legacyProfileRoutesDelta = profileRoutesCalls - legacyRoutesBefore;
+  const legacyRequestProfileDelta = calls.length - legacyRequestProfileBefore;
+
+  const legacyNoProfileScope = api.normalizeQuotaScope({ connectionId: "  ", profile: "  " });
+  const legacyNoProfileLiveBefore = liveCalls.length;
+  await api.quotaCli(legacyNoProfileScope, ["quota", "status"]);
+  const legacyNoProfileCall = liveCalls[legacyNoProfileLiveBefore];
+
+  activeProfile = "";
+  const legacyDefaultScope = api.normalizeQuotaScope({ connectionId: "" });
+  activeProfile = "shared";
+
+  let liveTimeoutFailure = "";
+  const liveTimeoutBefore = liveCalls.length;
+  hangLive = true;
+  try {
+    await api.quotaCli(legacyScope, ["quota", "status"], 5);
+  } catch (error) {
+    liveTimeoutFailure = String(error && error.message || error);
+  }
+  hangLive = false;
+  if (releaseLive) {
+    releaseLive(new Error("late socket drop"));
+    releaseLive = null;
+  }
+  await new Promise((resolve) => setImmediate(resolve));
+  const liveTimeoutCall = liveCalls[liveTimeoutBefore];
+
+  let liveRejectionFailure = "";
+  liveError = new Error("live socket closed");
+  try {
+    await api.quotaCli(legacyScope, ["quota", "status"]);
+  } catch (error) {
+    liveRejectionFailure = String(error && error.message || error);
+  }
+  liveError = null;
+
   hangRoutes = true;
   let timeoutFailure = "";
   try {
@@ -271,6 +347,20 @@ const makeUseQuota = new Function(
     ambiguousFailure,
     missingFailure,
     nullOwnerFailure,
+    nullScope,
+    legacyScope,
+    legacyResult,
+    legacyCall,
+    legacyProfileRoutesDelta,
+    legacyRequestProfileDelta,
+    legacyNoProfileScope,
+    legacyNoProfileCall,
+    legacyDefaultScope,
+    liveTimeoutFailure,
+    liveTimeoutCall,
+    liveRejectionFailure,
+    unhandledRejections,
+    liveCalls,
     callsAfterAmbiguousRoute,
     callsAfterMissingRoute,
     timeoutFailure,
@@ -336,6 +426,50 @@ class WidgetProfileRoutingTests(unittest.TestCase):
         self.assertTrue(self.result["nullOwnerFailure"])
         self.assertEqual(0, self.result["callsAfterAmbiguousRoute"])
         self.assertEqual(0, self.result["callsAfterMissingRoute"])
+
+    def test_legacy_single_connection_uses_the_live_gateway(self) -> None:
+        self.assertIsNone(self.result["nullScope"])
+        self.assertEqual(
+            {"connectionId": "", "profile": "default", "live": True},
+            self.result["legacyScope"],
+        )
+        call = self.result["legacyCall"]
+        self.assertEqual("cli.exec", call["method"])
+        self.assertEqual(
+            [
+                "--profile",
+                "default",
+                "quota",
+                "status",
+                "--json",
+                "--cached",
+            ],
+            call["params"]["argv"],
+        )
+        self.assertEqual({"code": 0, "output": "{}"}, self.result["legacyResult"])
+        self.assertEqual(0, self.result["legacyProfileRoutesDelta"])
+        self.assertEqual(0, self.result["legacyRequestProfileDelta"])
+
+    def test_legacy_single_connection_resolves_the_live_profile(self) -> None:
+        self.assertEqual(
+            {"connectionId": "", "profile": "shared", "live": True},
+            self.result["legacyNoProfileScope"],
+        )
+        self.assertEqual(
+            ["--profile", "shared", "quota", "status"],
+            self.result["legacyNoProfileCall"]["params"]["argv"],
+        )
+        self.assertEqual(
+            {"connectionId": "", "profile": "default", "live": True},
+            self.result["legacyDefaultScope"],
+        )
+        self.assertEqual(4, len(self.result["liveCalls"]))
+
+    def test_live_gateway_timeout_and_rejection_are_bounded(self) -> None:
+        self.assertIn("quota cli timeout", self.result["liveTimeoutFailure"])
+        self.assertEqual("cli.exec", self.result["liveTimeoutCall"]["method"])
+        self.assertEqual("live socket closed", self.result["liveRejectionFailure"])
+        self.assertEqual(0, self.result["unhandledRejections"])
 
     def test_manual_refresh_captures_click_time_owner_at_foreground_priority(self) -> None:
         self.assertEqual(

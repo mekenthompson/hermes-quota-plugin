@@ -29,11 +29,12 @@ class CodexStaleWidgetTests(unittest.TestCase):
                 self.assertIn('94% left · stale', tooltip_text(tree))
                 button = next(n for n in nodes(tree) if n.get('type') == 'button')
                 self.assertIn('stale', button['props']['aria-label'])
-                dot = next(n for n in nodes(tree)
-                           if 'rounded-full' in n.get('props', {}).get('className', '')
-                           and 'background' in n.get('props', {}).get('style', {}))
-                self.assertEqual(dot['props']['style']['background'],
-                                 'var(--ui-stroke-tertiary)')
+                # The chip's mini ring gauge is drawn in the muted tone.
+                ring = next(n for n in nodes(tree) if 'data-ring' in n.get('props', {}))
+                self.assertEqual(ring['props']['data-ring'], 'muted')
+                arc = next(n for n in nodes(ring) if n.get('type') == 'circle'
+                           and n['props'].get('strokeDasharray'))
+                self.assertEqual(arc['props']['stroke'], 'var(--ui-stroke-tertiary)')
 
     def test_fresh_data_removes_strikethrough(self):
         stale = render(component='status', data=payload(age=1000))

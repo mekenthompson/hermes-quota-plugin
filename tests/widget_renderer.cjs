@@ -15,6 +15,11 @@ function renderWidget(options = {}) {
     // Keep tooltip labels separate from trigger text/native title. This is a
     // structural test seam, not a simulation of hover (see hover test).
     Tip: props => ({type: 'Tip', props}),
+    // Radix Popover.Root renders no element, and the card is only built while
+    // open (useState(false) here): a closed chip stays Tip > trigger > button.
+    Popover: props => { const kids = [].concat(props.children).filter(Boolean); return kids.length === 1 ? kids[0] : {type: 'Popover', props}; },
+    PopoverTrigger: props => props.children,
+    PopoverContent: props => ({type: 'PopoverContent', props}),
     StatusDot: ({tone}) => jsx('span', {'data-tone': tone}),
     Input: 'input', Switch: 'input', SegmentedControl: 'span', icons: {},
     // Quota commands route to the focused profile's owner (#26); the pane reads
@@ -25,18 +30,30 @@ function renderWidget(options = {}) {
     fmtDayTime: new Intl.DateTimeFormat('en-US'), console,
     Date, Intl, setTimeout, clearTimeout,
   };
+  const openedExternal = [];
   const file = options.source || require('node:path').join(__dirname, '../desktop/plugin.js');
   const source = fs.readFileSync(file, 'utf8').replace(/^import[\s\S]*?from ["'][^"']+["'];/gm, '').replace('export default {', 'const plugin = {');
   vm.createContext(context);
   vm.runInContext(source + '\nplugin.register(TEST_CTX); paneDetailAtom.set(TEST_MODE);', Object.assign(context, {
     TEST_MODE: options.mode || 'dense',
-    TEST_CTX: {storage: {get: () => undefined}, i18n: {register: v => {translations = v.en;}}, register: () => () => {}},
+    TEST_CTX: {storage: {get: () => undefined}, os: {openExternal: async url => { openedExternal.push(url); return true; }}, i18n: {register: v => {translations = v.en;}}, register: () => () => {}},
   }));
   vm.runInContext('statusbarModeAtom.set(TEST_STATUS_MODE); disabledProvidersAtom.set(TEST_DISABLED);', Object.assign(context, { TEST_STATUS_MODE: options.statusMode || 'all', TEST_DISABLED: options.disabled || [] }));
   context.PROVIDER = options.provider;
   context.WIDGET_ID = options.id || 'deepseek';
   const expression = options.component === 'status' ? 'StatusBar()' : options.component === 'chip' ? 'ProviderChip({pid:WIDGET_ID,provider:PROVIDER})' : options.component === 'row' ? 'ProviderRow({id:WIDGET_ID,provider:PROVIDER})' : options.component === 'worst' ? 'QuotaChipWithBar()' : 'QuotaPane()';
-  return vm.runInContext(expression, context);
+  const tree = vm.runInContext(expression, context);
+  if (options.clickLinks) {
+    const visit = node => {
+      if (Array.isArray(node)) return node.forEach(visit);
+      if (!node || typeof node !== 'object') return;
+      if (node.type === 'a' && typeof node.props.onClick === 'function') node.props.onClick({preventDefault() {}});
+      visit(node.props?.children);
+    };
+    visit(tree);
+  }
+  tree.openedExternal = openedExternal;
+  return tree;
 }
 module.exports = {renderWidget};
 if (require.main === module) process.stdout.write(JSON.stringify(renderWidget(JSON.parse(fs.readFileSync(0, 'utf8')))));

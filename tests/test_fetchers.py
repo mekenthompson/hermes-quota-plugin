@@ -80,7 +80,7 @@ def _urlopen_returning(payload: dict):
 
 
 class OpenAICodexFetcherTests(unittest.TestCase):
-    def test_usage_url_helpers_preserve_configured_backend(self):
+    def test_usage_url_helpers_preserve_saved_backend(self):
         from quota_providers import builtin
         from test_codex_accounts import auth_modules, token, mock_http
         for helper in ('_codex_backend_urls', '_resolve_codex_usage_url'):
@@ -88,17 +88,18 @@ class OpenAICodexFetcherTests(unittest.TestCase):
                                      'base_url': 'https://saved.invalid/codex'}])
             usage = modules['agent.account_usage']
             del usage._codex_backend_urls
-            resolve = mock.Mock(return_value=('https://configured.invalid/api/codex/usage',)
-                                if helper == '_codex_backend_urls' else 'https://configured.invalid/api/codex/usage')
+            resolve = mock.Mock(return_value=('https://saved.invalid/api/codex/usage',)
+                                if helper == '_codex_backend_urls' else 'https://saved.invalid/api/codex/usage')
             setattr(usage, helper, resolve)
             route = mock.Mock(return_value='https://configured.invalid')
             modules['hermes_cli.auth_codex']._codex_pool_route_base_url = route
             with self.subTest(helper=helper), mock.patch.dict(sys.modules, modules), mock_http(side_effect=_urlopen_returning({'rate_limit': {'primary_window': {'used_percent': 21}}})) as http:
                 result = builtin._fetch_codex_with_models()
             self.assertIsNone(result.unavailable_reason)
-            self.assertEqual(str(http.call_args.args[0].url), 'https://configured.invalid/api/codex/usage')
-            route.assert_called_once_with('https://saved.invalid/codex')
-            resolve.assert_called_once_with('https://configured.invalid')
+            self.assertEqual(str(http.call_args.args[0].url), 'https://saved.invalid/api/codex/usage')
+            # A saved account host must not inherit the model's proxy route.
+            route.assert_not_called()
+            resolve.assert_called_once_with('https://saved.invalid/codex')
 
     def test_legacy_saved_account_header_and_old_auth_base_helper(self):
         from quota_providers import builtin

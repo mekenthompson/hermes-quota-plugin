@@ -31,8 +31,17 @@ Cache schema (``quota_cache.json``)::
         },
         "grok": {"label": "grok", "plan": null,
                  "unavailable_reason": "cloudflare-blocked", "windows": []}
+      },
+      "codex_special_reset": {
+        "announcement": null,
+        "fetched_at": null,
+        "stale": true,
+        "unavailable_reason": "codex-not-configured"
       }
     }
+
+``codex_special_reset`` is public announcement metadata for Codex. It is not
+account quota: it never changes a provider window or ``reset_at``.
 """
 
 from __future__ import annotations
@@ -40,14 +49,17 @@ from __future__ import annotations
 import json
 import logging
 import os
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 from hermes_constants import get_hermes_home
 from .quota_providers import PROVIDER_FETCHERS, QuotaAccount, QuotaResult, GENERATED_ACCOUNT_ID_PREFIX
 from .quota_providers.codex import display_label
+from . import codex_special_reset
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +76,39 @@ REFRESH_BUDGET_S = 20.0
 
 def _cache_path() -> str:
     return os.path.join(str(get_hermes_home()), _CACHE_FILENAME)
+
+
+def timezone_name() -> str:
+    """Hermes' configured IANA timezone; ``''`` means the host system zone.
+
+    The quota surfaces format timestamps with this zone instead of inheriting
+    whatever ``TZ`` the gateway process happened to start with: a widget or a
+    slash command must show the user's clock, not the server's.
+    """
+    try:
+        path = Path(get_hermes_home()) / "config.yaml"
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.startswith("timezone:"):
+                value = line.split(":", 1)[1].split("#", 1)[0].strip()
+                return value.strip("'\"")
+    except Exception:
+        logger.debug("quota_cache ▸ timezone read failed", exc_info=True)
+    return ""
+
+
+def local_tz():
+    """The user's timezone; the system zone when Hermes has no setting."""
+    name = timezone_name()
+    if name:
+        try:
+            from zoneinfo import ZoneInfo
+            return ZoneInfo(name)
+        except Exception:
+            logger.debug("quota_cache ▸ invalid timezone %r", name, exc_info=True)
+    try:
+        return datetime.now().astimezone().tzinfo or timezone.utc
+    except Exception:
+        return timezone.utc
 
 
 def read_quota_cache() -> dict[str, Any]:
@@ -124,25 +169,33 @@ def _result_to_record(res: QuotaResult) -> dict[str, Any]:
         ],
         "api_calls_available": res.api_calls_available,
         "windows": [
-            {"label": w.label, "used_percent": w.used_percent, "reset_at": w.reset_at}
+            {"label": w.label, "used_percent": w.used_percent, "reset_at": w.reset_at,
+                     **({"duration_seconds": w.duration_seconds} if w.duration_seconds is not None else {})}
             for w in res.windows
         ],
     }
-    if res.history_id:
-        record["history_id"] = res.history_id
     if res.account_label:
         record["account_label"] = res.account_label
+    if res.history_id:
+        record["history_id"] = res.history_id
+    if res.observed_at:
+        record["observed_at"] = res.observed_at
+    if res.stale:
+        record["stale"] = True
     if res.accounts:
         record["accounts"] = [
             ({
                 "id": account.id,
+                "history_id": account.history_id,
+                "observed_at": account.observed_at,
+                "stale": account.stale,
                 "label": account.label,
                 "plan": account.plan,
                 "unavailable_reason": account.unavailable_reason,
                 "details": list(account.details or []),
-                **({"history_id": account.history_id} if account.history_id else {}),
                 "windows": [
-                    {"label": w.label, "used_percent": w.used_percent, "reset_at": w.reset_at}
+                    {"label": w.label, "used_percent": w.used_percent, "reset_at": w.reset_at,
+                     **({"duration_seconds": w.duration_seconds} if w.duration_seconds is not None else {})}
                     for w in account.windows
                 ],
             } if isinstance(account, QuotaAccount) else _result_to_record(account))
@@ -215,13 +268,15 @@ def _expand_accounts(provider_id: str, record: Any) -> dict[str, Any]:
             "provider": provider_id,
             "account_id": account_id.strip() if isinstance(account_id, str) and account_id.strip() else None,
             "account_label": account_label,
+            "history_id": account.get("history_id"),
+            "observed_at": account.get("observed_at"),
+            "stale": bool(account.get("stale")),
             "plan": account.get("plan"),
             "unavailable_reason": reason if isinstance(reason, str) and reason else None,
             "details": [str(d) for d in details] if isinstance(details, list) else [],
             "windows": windows if isinstance(windows, list) else [],
             "account_balances": [],
             "api_calls_available": None,
-            **({"history_id": account["history_id"]} if account.get("history_id") else {}),
         }
     return rows
 
@@ -234,6 +289,61 @@ def _unavailable_record(provider_id: str, reason: str) -> dict[str, Any]:
         "details": [],
         "windows": [],
     }
+
+
+def _codex_configured(providers: dict[str, Any]) -> bool:
+    """Whether the real Codex result reflects a configured account.
+
+    The announcement source is only consulted when Codex is actually set up,
+    so an unrelated quota sweep never makes this third-party request. Any
+    response other than the two "nothing configured" reasons means Codex was
+    found, including a failed usage fetch for an existing account.
+    """
+    record = providers.get("openai-codex")
+    if not isinstance(record, dict):
+        return False
+    return record.get("unavailable_reason") not in (
+        "no-credentials", "fetcher-unavailable",
+    )
+
+
+def _special_rank(entry: Any) -> tuple[float, int]:
+    """Order announcement cache entries by honest success time, then trust."""
+    normalized = codex_special_reset.normalize_entry(entry)
+    fetched_at = normalized.get("fetched_at")
+    stamp = float("-inf")
+    if fetched_at:
+        try:
+            stamp = datetime.fromisoformat(fetched_at).timestamp()
+        except (ValueError, TypeError, OverflowError):
+            stamp = float("-inf")
+    return stamp, 0 if normalized.get("stale") else 1
+
+
+def _prefer_newer_special(on_disk: Any, candidate: dict[str, Any]) -> dict[str, Any]:
+    """Never let a slow process clobber a newer success written by another."""
+    if not isinstance(on_disk, dict):
+        return candidate
+    if _special_rank(on_disk) > _special_rank(candidate):
+        return codex_special_reset.normalize_entry(on_disk)
+    return candidate
+
+
+def _collect_special_reset(previous: Any, configured: bool,
+                           deadline: float, state_path: str) -> dict[str, Any]:
+    """Fetch the public announcement inside the existing sweep deadline."""
+    if not configured:
+        return codex_special_reset.empty_entry("codex-not-configured")
+    if deadline <= time.monotonic():
+        # Never start a request we already have no budget to wait for.
+        return codex_special_reset.stale_entry(previous, "timeout")
+    try:
+        return codex_special_reset.refresh(
+            previous, state_path=state_path,
+            timeout=max(0.0, deadline - time.monotonic()))
+    except Exception:
+        logger.debug("quota_cache ▸ special reset failed", exc_info=True)
+        return codex_special_reset.stale_entry(previous, "fetch-error")
 
 
 def _fetch_one(provider_id: str, fetcher: Any) -> dict[str, Any]:
@@ -257,7 +367,7 @@ def _fetch_one(provider_id: str, fetcher: Any) -> dict[str, Any]:
 
 
 def managed_collection_enabled() -> bool:
-    """Explicit collector ownership prevents local refresh from erasing a sweep."""
+    """Collector ownership prevents a local refresh replacing shared observations."""
     try:
         from hermes_cli.config import load_config_readonly
         config = load_config_readonly() or {}
@@ -280,14 +390,17 @@ def refresh_quota_cache(*, budget: Optional[float] = None, provider_ids=None, pe
     if persist and managed_collection_enabled():
         raise ValueError("quota view is collector-managed; use sample/ingest instead of local refresh")
     budget_s = REFRESH_BUDGET_S if budget is None else max(0.0, float(budget))
+    previous_special = read_quota_cache().get("codex_special_reset")
     items = list(PROVIDER_FETCHERS.items())
     if provider_ids is not None:
         if not provider_ids or any(pid not in PROVIDER_FETCHERS for pid in provider_ids):
             raise ValueError("unknown or empty quota provider selection")
-        selected = set(provider_ids)
-        items = [(pid, fetcher) for pid, fetcher in items if pid in selected]
+        items = [(pid, fetcher) for pid, fetcher in items if pid in set(provider_ids)]
     results: dict[str, Any] = {}
     lock = threading.Lock()
+    deadline = time.monotonic() + budget_s
+    # Resolve on the profile's caller thread, before spawning any workers.
+    state_path = codex_special_reset._state_path()
 
     def _worker(pid: str, fetcher: Any, event: threading.Event) -> None:
         record = _unavailable_record(pid, "fetch-error")
@@ -317,39 +430,130 @@ def refresh_quota_cache(*, budget: Optional[float] = None, provider_ids=None, pe
             daemon=True,
         ).start()
 
-    deadline = time.monotonic() + budget_s
+    special_result: dict[str, Any] = {}
+    special_done = threading.Event()
+
+    def _special_worker() -> None:
+        try:
+            if not persist:
+                return  # quota-only representative sampling has no announcement writes
+            codex_done = events.get("openai-codex")
+            if codex_done is None:
+                special_result["entry"] = codex_special_reset.empty_entry(
+                    "codex-not-configured")
+                return
+            codex_done.wait(max(0.0, deadline - time.monotonic()))
+            with lock:
+                codex = results.get("openai-codex") or _unavailable_record(
+                    "openai-codex", "timeout")
+            special_result["entry"] = _collect_special_reset(
+                previous_special, _codex_configured({"openai-codex": codex}),
+                deadline, state_path)
+        finally:
+            special_done.set()
+
+    # Wait only for Codex discovery, not every other provider: a slow unrelated
+    # vendor must not consume the announcement collector's entire budget.
+    threading.Thread(target=_special_worker, name="quota-special-reset",
+                     daemon=True).start()
     for event in events.values():
         event.wait(max(0.0, deadline - time.monotonic()))
+    special_done.wait(max(0.0, deadline - time.monotonic()))
 
     with lock:
         providers: dict[str, Any] = {}
         for provider_id, _fetcher in items:
             record = results.get(provider_id) or _unavailable_record(provider_id, "timeout")
             providers.update(_expand_accounts(provider_id, record))
+        # A sweep whose registry is incomplete (a stub registry in a test, an
+        # import race) must not delete providers it never tried. Carry the
+        # previous record forward, marked so the display never presents it as
+        # current.
+        swept = {provider_id for provider_id, _fetcher in items}
+        previous_providers = (read_quota_cache().get("providers") or {}) if persist else {}
+        orphans = [key for key in previous_providers
+                   if str(key).split(":", 1)[0] not in swept]
+        for key in orphans:
+            record = previous_providers.get(key)
+            if not isinstance(record, dict):
+                continue
+            # Keep the identity (label/plan) and the note, drop the numbers: a
+            # sweep that never tried this provider cannot claim its windows are
+            # current, and both the CLI and the widget render windows whenever
+            # they exist.
+            carried = dict(record)
+            carried["unavailable_reason"] = "not-refreshed"
+            carried["windows"] = []
+            carried["account_balances"] = []
+            carried["api_calls_available"] = None
+            note = "Not refreshed in this sweep: the provider registry was incomplete"
+            details = [d for d in (carried.get("details") or []) if d != note]
+            details.append(note)
+            carried["details"] = details
+            providers[key] = carried
+    if orphans:
+        logger.warning(
+            "quota_cache ▸ sweep covered %d provider(s), kept %d from the previous cache",
+            len(swept), len(orphans))
 
-    cache = {"fetched_at": datetime.now(timezone.utc).isoformat(), "providers": providers}
+    special = special_result.get("entry") if special_done.is_set() else None
+    if not isinstance(special, dict):
+        special = codex_special_reset.stale_entry(previous_special, "timeout")
+    cache = {
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "providers": providers,
+        "codex_special_reset": special,
+        # Host metadata: the widgets format announcements in the user's zone
+        # instead of trusting the process TZ they happen to run under.
+        "timezone": timezone_name(),
+    }
+
     if not persist:
         return cache
 
     try:
         with _CACHE_LOCK:
+            # A sibling process may have written a newer announcement success
+            # while this sweep ran; its entry is authoritative.
+            on_disk = read_quota_cache().get("codex_special_reset")
+            cache["codex_special_reset"] = _prefer_newer_special(on_disk, special)
             path = _cache_path()
-            tmp = path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump(cache, fh, indent=2, sort_keys=True)
-            os.replace(tmp, path)
+            fd, tmp = tempfile.mkstemp(
+                prefix="." + os.path.basename(path) + ".", suffix=".tmp",
+                dir=os.path.dirname(os.path.abspath(path)))
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    json.dump(cache, fh, indent=2, sort_keys=True)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(tmp, path)
+                tmp = None
+            finally:
+                if tmp is not None:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
     except Exception:
         logger.debug("quota_cache ▸ write failed", exc_info=True)
 
+    _record_history(cache)
     return cache
 
 
-def ingest_snapshot(snapshot):
-    """Persist an explicitly supplied sanitized account sweep; no vendor I/O.
+def _record_history(cache: dict[str, Any]) -> None:
+    """Append this sweep's readings to the monitor's quota history (docs/monitor.md). Fail-open: history is a
+    by-product of the refresh and must never break or slow it beyond one local sqlite write."""
+    try:
+        from .quota_monitor import quotas as monitor_quotas
+        # next to the cache file this sweep wrote, so the history follows the cache's home
+        monitor_quotas.record_from_cache(cache, home=os.path.dirname(_cache_path()))
+    except Exception:
+        logger.debug("quota_cache ▸ history record failed", exc_info=True)
 
-    History is authoritative. A failed display-cache update propagates; retrying
-    the identical sweep is safe because history inserts are idempotent.
-    """
+
+def ingest_snapshot(snapshot):
+    """Commit sanitized shared observations to the canonical ledger and view."""
     from .quota_history import sanitize_snapshot, record_snapshot
     from pathlib import Path
     clean = sanitize_snapshot(snapshot)
@@ -361,11 +565,12 @@ def ingest_snapshot(snapshot):
         if path.is_symlink():
             raise ValueError("quota cache path must not be a symlink")
         record_snapshot(clean)
-        import tempfile
         fd, temp = tempfile.mkstemp(prefix=".quota-ingest-", dir=str(path.parent))
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
                 json.dump(clean, stream, sort_keys=True)
+                stream.flush()
+                os.fsync(stream.fileno())
             os.replace(temp, path)
         finally:
             if os.path.exists(temp):

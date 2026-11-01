@@ -2,6 +2,23 @@
 
 Community work integrated into this plugin, with thanks:
 
+## Agent Monitor — the 3.0 milestone
+
+A huge thank-you to [@Asimatasert](https://github.com/Asimatasert) for the
+[Agent Monitor proposal (#83)](https://github.com/rarf/hermes-quota-plugin/issues/83)
+and implementation from [agent-monitor](https://github.com/Asimatasert/agent-monitor).
+The contribution brings live session views, quota history and forecasts,
+health and usage views, context guard, status-bar indicators, localization and
+extensive synthetic tests into the plugin, without a separate dashboard server.
+Thanks also for the follow-up YAML-loader fix in
+[PR #84](https://github.com/rarf/hermes-quota-plugin/pull/84).
+
+The 3.0 integration preserves maintainer-side opt-in and profile-scoping
+hardening. Some capabilities from the original proposal remain deliberately
+unavailable; see [the shipped monitor contract](monitor.md).
+
+## Provider and platform contributions
+
 - [@d31tcjg](https://github.com/d31tcjg) for Chrome cookie import for the Grok
   provider (#2)
 - [@tdoan35](https://github.com/tdoan35) for the Z.ai Coding Plan provider, the

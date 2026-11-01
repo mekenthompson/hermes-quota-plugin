@@ -132,6 +132,29 @@ class _SweepTest(unittest.TestCase):
         self.assertEqual(on_disk["providers"]["p0"]["windows"][0]["used_percent"], 10.0)
         self.assertEqual(on_disk["fetched_at"], cache["fetched_at"])
 
+    def test_incomplete_registry_keeps_previous_providers(self) -> None:
+        """A sweep that never tried a provider must not delete it."""
+        path = Path(self._tmp.name) / "quota_cache.json"
+        path.write_text(json.dumps({"providers": {
+            "kept": {"label": "kept", "windows": [{"label": "Weekly", "used_percent": 40}]},
+            "swept": {"label": "swept", "windows": []},
+        }}), encoding="utf-8")
+
+        cache, _elapsed = self._run({"swept": lambda: _ok("swept")}, budget=1.0)
+
+        self.assertIn("kept", cache["providers"])
+        kept = cache["providers"]["kept"]
+        self.assertEqual(kept["unavailable_reason"], "not-refreshed")
+        self.assertEqual(kept["windows"], [], "unattempted providers must not present stale numbers")
+        self.assertEqual(kept["account_balances"], [])
+        self.assertIn("Not refreshed in this sweep", " ".join(kept["details"]))
+        self.assertNotEqual(cache["providers"]["swept"].get("unavailable_reason"), "not-refreshed")
+
+        # A second incomplete sweep must not accumulate the note.
+        cache, _elapsed = self._run({"swept": lambda: _ok("swept")}, budget=1.0)
+        notes = [d for d in cache["providers"]["kept"]["details"] if d.startswith("Not refreshed in this sweep")]
+        self.assertEqual(len(notes), 1)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

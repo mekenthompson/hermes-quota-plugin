@@ -104,7 +104,7 @@ def quota_history(days: int = 30) -> dict[str, Any]:
     if not 1 <= days <= 90:
         raise HTTPException(status_code=400, detail="history days must be between 1 and 90")
     rows = history.read_history(days=days)
-    return {"samples": rows, "daily_changes": history.daily_changes(rows)}
+    return {"samples": rows, "daily_changes": history.daily_changes(rows), "weeks": history.completed_weeks(rows)}
 
 
 @router.get("/forecast")

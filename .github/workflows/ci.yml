@@ -21,15 +21,14 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Byte-compile all backend sources
+        run: python -m py_compile __init__.py commands.py quota_cache.py quota_history.py codex_special_reset.py quota_providers/*.py quota_monitor/*.py dashboard/plugin_api.py
+
       - name: Install test-only safety dependencies
         run: python -m pip install -r tests/requirements-ci.txt
 
-      - name: Byte-compile all backend sources
-        run: python -m py_compile __init__.py commands.py quota_cache.py quota_providers/*.py
-
-      - name: Run offline unit tests
+      - name: Required safety regressions execute without skips
         run: |
-          python -m unittest discover -s tests -p "test_*.py" -v
           python - <<'PY'
           import sys, unittest
           sys.path.insert(0, "tests")
@@ -43,11 +42,15 @@ jobs:
           if not result.wasSuccessful() or result.skipped or result.testsRun != len(names):
               sys.exit("Applicable safety tests must execute successfully with zero skips")
           PY
+
+      - name: Run offline unit tests
+        run: |
+          python -m unittest discover -s tests -p "test_*.py" -v
         env:
           PYTHONPATH: ${{ github.workspace }}
 
   widget-js:
-    name: Desktop widget syntax
+    name: Desktop and TUI widgets
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -60,11 +63,14 @@ jobs:
         # desktop/*.js alone missed scripts/render-widget.cjs and
         # tests/widget_renderer.cjs, so neither harness was ever syntax-checked.
         run: |
-          for f in desktop/*.js desktop/*.cjs scripts/*.cjs tests/*.cjs; do
+          for f in desktop/*.js desktop/*.cjs scripts/*.cjs tests/*.cjs tui/*.mjs tests/*.mjs; do
             [ -e "$f" ] || continue
             node --check "$f"
             echo "OK $f"
           done
+
+      - name: Offline TUI widget tests
+        run: node --test tests/tui-panel.test.mjs
 
       - name: Dashboard forecast rendering
         run: |

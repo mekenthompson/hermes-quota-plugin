@@ -14,6 +14,26 @@ class ExchangeTest(unittest.TestCase):
         self.modules.start()
     def tearDown(self):
         self.modules.stop()
+    def test_verified_account_identity_survives_cache_expansion(self):
+        from quota_providers import QuotaWindow
+        window = QuotaWindow(label='Weekly', used_percent=20, duration_seconds=604800)
+        result = cache.QuotaResult(label='Claude', accounts=[cache.QuotaAccount(id='work', history_id='a'*64, windows=[window])])
+        expanded = cache._expand_accounts('anthropic', cache._result_to_record(result))
+        self.assertEqual(expanded['anthropic:work'].get('history_id'), 'a'*64)
+        self.assertEqual(expanded['anthropic:work']['windows'][0].get('duration_seconds'), 604800)
+
+    def test_managed_status_exposes_canonical_history_without_monitor(self):
+        with mock.patch.dict(sys.modules, {'hermes_constants': constants}):
+            commands = importlib.import_module('quota_exchange_test.commands')
+        with mock.patch.object(commands, 'managed_collection_enabled', return_value=True), \
+             mock.patch.object(history, 'read_history', return_value=[]), \
+             mock.patch.object(commands, 'read_quota_cache', return_value={'providers': {}}), \
+             mock.patch.object(commands, 'refresh_quota_cache') as refresh:
+            data = json.loads(commands._render_quota_json())
+        self.assertTrue(data.get('managed_collection'))
+        self.assertEqual(data.get('canonical_history', {}).get('weeks'), {'cycles': [], 'averages': []})
+        refresh.assert_not_called()
+
     def test_provider_sample_does_not_poll_other_accounts_or_write_cache(self):
         from quota_exchange_test.quota_providers import QuotaResult,QuotaWindow
         one=mock.Mock(return_value=QuotaResult(label='grok',windows=[QuotaWindow(label='week',used_percent=20)]))

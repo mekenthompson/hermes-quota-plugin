@@ -53,16 +53,13 @@
     );
   }
 
-  function windowMs(label) {
-    var text = String(label || "").toLowerCase();
-    if (text.indexOf("session") >= 0) return 5 * 3600 * 1000;
-    if (text.indexOf("week") >= 0) return 7 * 24 * 3600 * 1000;
-    return null;
+  function windowMs(duration) {
+    return Number.isInteger(duration) && duration > 0 ? duration * 1000 : null;
   }
 
   function pacePoints(forecast, samples) {
     return (samples || []).filter(function (row) {
-      return row && row.status === "ok" && row.provider === forecast.provider && row.account === forecast.account && row.window === forecast.window && row.reset_at === forecast.reset_at && typeof row.used_percent === "number" && isFinite(row.used_percent);
+      return row && forecast.continuity_start && row.fetched_at >= forecast.continuity_start && row.status === "ok" && row.provider === forecast.provider && row.account === forecast.account && row.window === forecast.window && row.reset_at === forecast.reset_at && typeof row.used_percent === "number" && isFinite(row.used_percent);
     }).map(function (row) {
       return { t: new Date(row.fetched_at).getTime(), used: Math.max(0, Math.min(100, row.used_percent)) };
     }).filter(function (point) { return !isNaN(point.t); }).sort(function (a, b) { return a.t - b.t; });
@@ -75,8 +72,9 @@
     if (!forecast.reset_at || isNaN(reset) || points.length < 2) {
       return h("p", { style: { fontSize: 12 } }, "Not enough samples in this reset window for a pace chart.");
     }
-    var duration = windowMs(forecast.window);
-    var periodStart = duration ? reset - duration : points[0].t;
+    var duration = windowMs(forecast.duration_seconds);
+    if (!duration) return h("p", null, "Window duration unknown; no inferred even-pace target.");
+    var periodStart = reset - duration;
     var latest = points[points.length - 1];
     var span = reset - periodStart;
     var targetAt = function (t) {
@@ -188,6 +186,15 @@
             h(PaceChart, { forecast: f, samples: (hist && hist.samples) || [] })
           );
         }),
+      h("h2", { style: { fontSize: 16 } }, "Completed weeks"),
+      h("p", null, "Last observed use before reset, not a vendor total. Partial, failed, saturated or discontinuous cycles are excluded from averages."),
+      hist && hist.weeks ? h("div", null,
+        hist.weeks.averages.length ? hist.weeks.averages.map(function (r, i) {
+          return h("div", { key: i }, r.provider + " · " + r.account.slice(0, 8) + " · " + r.window + ": " + r.average_used_percent.toFixed(1) + "% across " + r.completed_cycles + " eligible weeks");
+        }) : h("p", null, "No eligible completed weeks"),
+        hist.weeks.cycles.slice(-12).map(function (r, i) {
+          return h("div", { key: i }, r.provider + " · " + r.account.slice(0, 8) + " · " + r.window + " · " + when(r.reset_at) + ": " + Math.round(r.coverage * 100) + "% coverage" + (r.partial ? " · partial" : "") + (r.saturated ? " · saturated" : "") + (r.discontinuity ? " · discontinuity" : "") + (r.failed ? " · unavailable samples" : ""));
+        })) : null,
       h("h2", { style: { fontSize: 16, marginTop: 20 } }, "Observed daily quota changes (UTC)"),
       h("p", { style: { fontSize: 12 } }, "Sampled percentage-point changes, not vendor daily usage totals. Gaps, unknown identities and resets are not joined."),
       !hist ? h("p", null, "Loading history") : hist.error ? h("p", null, "History unavailable") :

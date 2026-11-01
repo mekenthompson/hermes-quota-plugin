@@ -18,10 +18,12 @@ const fixture = {age_s: 0, providers: {'openai-codex': {accounts: [
 ]}}};
 const sdk = `
 export {Tip} from ${JSON.stringify(path.join(desktop, 'src/components/ui/tooltip.tsx'))};
+export {Popover, PopoverContent, PopoverTrigger} from ${JSON.stringify(path.join(desktop, 'src/components/ui/popover.tsx'))};
 export const atom = value => ({get:()=>value,set:v=>{value=v}});
 export const useValue = a=>a.get();
 export const useQuery = ()=>{const data=${JSON.stringify(fixture)}; if(new URLSearchParams(location.search).has("single")) for(const a of data.providers["openai-codex"].accounts) a.windows=a.windows.slice(0,1); return {data};};
 export const useQueryClient = ()=>({invalidateQueries:()=>{}});
+export const queryClient = {getQueriesData:()=>[],getQueryCache:()=>({subscribe:()=>()=>{}})};
 export const useMutation = ()=>({});
 export const usePluginI18n = ()=>key=>key;
 export const cn = (...args)=>args.filter(Boolean).join(' ');
@@ -40,7 +42,7 @@ export const icons={}, PANES_AREA='',ROUTES_AREA='',SIDEBAR_NAV_AREA='',STATUSBA
     // placement, React, Radix, portal and floating geometry run unchanged.
     b.onResolve({filter:/^@\/(i18n|lib\/keybinds\/use-keybind-hint)$/},()=>({path:'hooks',namespace:'hooks'}));
     b.onLoad({filter:/.*/,namespace:'hooks'},()=>({contents:'export const useI18n=()=>({}); export const useKeybindHint=()=>null;'}));
-    b.onResolve({filter:/^@\//},a=>({path:path.join(desktop,'src',a.path.slice(2)+'.ts')}));
+    b.onResolve({filter:/^@\//},a=>{const base=path.join(desktop,'src',a.path.slice(2));const hit=[base+'.ts',base+'.tsx',path.join(base,'index.ts'),path.join(base,'index.tsx')].find(f=>fs.existsSync(f));return {path:hit||base+'.ts'};});
   }}]});
   const html = '<!doctype html><html><head><link rel="stylesheet" href="hover.css"><style>body{margin:0;background:#202124;color:#eee;font:14px sans-serif}#root{position:fixed;bottom:0;left:0;right:0;height:28px;display:flex;align-items:center;overflow:hidden}button{color:inherit;background:#303134;border:0;height:28px}.tooltip-bubble{background:#eee;color:#171717;padding:8px;font:12px/1.4 sans-serif;z-index:10000}</style></head><body><div id="root"></div><script src="hover.js"></script></body></html>';
   fs.writeFileSync(path.join(out,'index.html'),html);
@@ -81,7 +83,7 @@ export const icons={}, PANES_AREA='',ROUTES_AREA='',SIDEBAR_NAV_AREA='',STATUSBA
         assert.match(await button.getAttribute('aria-label'),/OpenAI Codex/);
         assert.match(evidence.button,/Synthetic Amber/); assert.doesNotMatch(evidence.button,/Synthetic Blue/);
         assert.ok(evidence.label.indexOf('Synthetic Amber')<evidence.label.indexOf('Synthetic Blue'));
-        for(const part of ['● Synthetic Amber · 79% left','○ Synthetic Blue · 58% left', ...(single?['Session · resets in']:['Session · 79% left · resets in','Weekly · 90% left · resets in','Weekly · 70% left · resets in'])]) assert.ok(evidence.label.includes(part),part);
+        for(const part of ['● Synthetic Amber · pro · 79% left','○ Synthetic Blue · plus · 58% left', ...(single?['Session · resets in']:['Session · 79% left · resets in','Weekly · 90% left · resets in','Weekly · 70% left · resets in'])]) assert.ok(evidence.label.includes(part),part);
         for(const part of ['OpenAI Codex · remaining','Shown in status bar','Click for details']) assert.ok(!evidence.label.includes(part),part);
         for(const old of ['priority-eligible','inference routing','selected for display','Generic Session','Plan:','2099-','Click to open Quota pane']) assert.ok(!evidence.label.includes(old),old);
         assert.equal(evidence.label.split('\n').length, 6-(single?2:0));
@@ -95,7 +97,16 @@ export const icons={}, PANES_AREA='',ROUTES_AREA='',SIDEBAR_NAV_AREA='',STATUSBA
         assert.ok(evidence.bounds.y>=0);
         assert.ok(evidence.bounds.y+evidence.bounds.height<=evidence.triggerBounds.y);
         await page.mouse.move(900,100); await bubble.waitFor({state:'hidden'});
-        await button.click();assert.equal(await page.evaluate(()=>window.navigated),'/quota');
+        // Click opens the quota card (Radix Popover); its footer link goes to /quota.
+        await button.click();
+        const card=page.locator('[data-slot="popover-content"]');
+        await card.waitFor({state:'visible',timeout:2500});
+        assert.ok((await card.locator('[data-card-window]').count())>=1,'card shows ring tiles');
+        evidence.cardBounds=await card.boundingBox();
+        await page.screenshot({path:path.join(out,mode+(single?'-single':'')+'-card.png')});
+        await card.locator('[data-card-link]').click();
+        assert.equal(await page.evaluate(()=>window.navigated),'/quota');
+        await card.waitFor({state:'hidden'});
         assert.deepEqual(errors,[]);
       }
       await page.close();

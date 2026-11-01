@@ -572,7 +572,7 @@ def _request_anthropic_usage_locked(
             "Accept": "application/json",
             "Content-Type": "application/json",
             "anthropic-beta": "oauth-2025-04-20",
-            "User-Agent": "hermes-quota-plugin/2.10.2",
+            "User-Agent": "hermes-quota-plugin/2.11.0",
         },
         method="GET",
     )
@@ -603,18 +603,13 @@ def _request_anthropic_usage_locked(
 
 
 def _claude_history_identity(token: str, *, timeout: float) -> Optional[str]:
-    """Opt-in same-token profile read. Never trust .claude.json identity hints.
-
-    Both account and organization are required: a user can own subscriptions in
-    several organizations. Only their domain-separated hash leaves this call.
-    No response bodies, email addresses, raw IDs or credential hashes persist.
-    """
+    """Hash the same-token authenticated account and organization, never local hints."""
     if timeout <= 0:
         return None
     request = urllib.request.Request(
         "https://api.anthropic.com/api/oauth/profile",
         headers={"Authorization": f"Bearer {token}", "Accept": "application/json",
-                 "User-Agent": "hermes-quota-plugin/2.10.2"}, method="GET")
+                 "User-Agent": "hermes-quota-plugin/3.0.0"}, method="GET")
     try:
         import uuid
         with urlopen_no_redirect(request, timeout=min(timeout, 3.0)) as response:
@@ -622,10 +617,8 @@ def _claude_history_identity(token: str, *, timeout: float) -> Optional[str]:
         if len(body) > _MAX_HTTP_BYTES:
             return None
         payload = json.loads(body)
-        account = payload.get("account", {}).get("uuid")
-        organization = payload.get("organization", {}).get("uuid")
-        account = str(uuid.UUID(account))
-        organization = str(uuid.UUID(organization))
+        account = str(uuid.UUID(payload.get("account", {}).get("uuid")))
+        organization = str(uuid.UUID(payload.get("organization", {}).get("uuid")))
         return hashlib.sha256(json.dumps(["anthropic", account, organization], separators=(",", ":")).encode()).hexdigest()
     except Exception:
         return None
@@ -677,6 +670,7 @@ def _parse_anthropic_usage(payload: dict[str, Any]) -> tuple[list[QuotaWindow], 
             label=label,
             used_percent=max(0.0, min(100.0, used)),
             reset_at=reset if isinstance(reset, str) and reset else None,
+            duration_seconds=18000 if key == "five_hour" else 604800,
         ))
 
     for window in parse_anthropic_scoped_limits(payload):
@@ -1020,9 +1014,6 @@ def _claude_account_results(
             continue
         fingerprint = _token_fingerprint(token)
         if fingerprint in seen_tokens:
-            # An explicitly opted-in directory may own the primary's exact
-            # credential. Keep its identity on the existing primary card,
-            # without fetching usage again or inventing a second account.
             if (primary_result is not None and fingerprint == primary_fp
                     and not primary_result.unavailable_reason
                     and not primary_result.history_id
@@ -1045,7 +1036,8 @@ def _claude_account_results(
                       if entry.get("verify_history_identity") is True else None)
         accounts.append(QuotaAccount(id=entry["id"], label=entry["label"],
                                      plan=_claude_subscription_type(str(account_dir)),
-                                     windows=windows, details=details, history_id=history_id))
+                                     windows=windows, details=details, history_id=history_id,
+                                     **_anthropic_observation(payload)))
     if overflow:
         accounts.append(QuotaAccount(
             id=f"{GENERATED_ACCOUNT_ID_PREFIX}limit",
@@ -1053,6 +1045,14 @@ def _claude_account_results(
             unavailable_reason=_CLAUDE_LIMIT_REASON,
             details=[_ACCOUNT_LIMIT_DETAIL]))
     return accounts
+
+
+def _anthropic_observation(payload):
+    from datetime import datetime, timezone
+    if isinstance(payload, _ObservedAnthropicPayload):
+        return {"observed_at": datetime.fromtimestamp(payload.observed_at, timezone.utc).isoformat(),
+                "stale": payload.stale}
+    return {"observed_at": datetime.now(timezone.utc).isoformat(), "stale": False}
 
 
 def _fetch_anthropic_single() -> QuotaResult:
@@ -1075,6 +1075,7 @@ def _fetch_anthropic_single() -> QuotaResult:
         plan=None,
         unavailable_reason=None,
         details=details,
+        **_anthropic_observation(payload),
     )
 
 
@@ -1096,7 +1097,8 @@ def _fetch_anthropic_multi(entries: list[dict[str, Any]]) -> QuotaResult:
         else:
             windows, details = _parse_anthropic_usage(payload)
             if windows or details:
-                primary = QuotaResult(label="anthropic", windows=windows, details=details)
+                primary = QuotaResult(label="anthropic", windows=windows, details=details,
+                                      **_anthropic_observation(payload))
             else:
                 primary_reason = "no-data"
 
@@ -1345,6 +1347,10 @@ def _parse_codex_payload(payload: dict) -> QuotaResult:
             label=label,
             used_percent=used_percent,
             reset_at=_iso(raw.get("reset_at")),
+            duration_seconds=(raw["limit_window_seconds"]
+                if isinstance(raw.get("limit_window_seconds"), int)
+                and not isinstance(raw.get("limit_window_seconds"), bool)
+                and 0 < raw["limit_window_seconds"] <= 31536000 else None),
         )
 
     windows: list[QuotaWindow] = []

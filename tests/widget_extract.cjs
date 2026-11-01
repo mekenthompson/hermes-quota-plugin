@@ -62,7 +62,14 @@ const SUPPORT = [
 	"balanceFractionDigits",
 	"accountFacts",
 	"providerTone",
+	// Locale: balanceText formats in the app language when no tag is given.
+	"normLocale",
+	"appLocale",
+	"intlTag",
 ];
+// Module state the locale helpers read (no ctx and no render here → "en").
+const INTL_TAGS_SRC = src.slice(src.indexOf("const INTL_TAGS = {"), src.indexOf("};", src.indexOf("const INTL_TAGS = {")) + 2);
+const PRELUDE = `let CTX = null;\nlet _renderLocale = null;\n${INTL_TAGS_SRC}\n`;
 const names = Array.from(new Set([...SUPPORT, ...Object.keys(input)]))
 	.filter((n) => src.includes("function " + n + "("));
 const parts = names.map(extract);
@@ -72,7 +79,7 @@ const factory = new Function(
 	"Math",
 	"Date",
 	"Number",
-	parts.join("\n\n") + "\nreturn { " + names.join(", ") + " };",
+	PRELUDE + parts.join("\n\n") + "\nreturn { " + names.join(", ") + " };",
 );
 const api = factory(Intl, JSON, Math, Date, Number);
 

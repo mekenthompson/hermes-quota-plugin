@@ -830,8 +830,15 @@ class WidgetAccountRenderTests(unittest.TestCase):
         }, "fetched_at": "2026-01-02T03:04:05Z", "age_s": 3}
         tree = render(data=data)
         rendered = text(tree)
-        self.assertIn("Anthropic · Work", rendered)
+        # CHANGED (multi-card feature): rows sharing a base provider now render
+        # as a card group — one button per row (the account's saved label; the
+        # primary falls back to its display name) with the selected row's card
+        # below — so the old flat "Anthropic · Work" card text no longer
+        # applies. The full button/click contract lives in
+        # tests/test_multicard_pane.py; here both rows must still be visible.
+        self.assertIn("Work", rendered)
         self.assertIn("Anthropic", rendered)
+        self.assertIn("90% left", rendered)  # the selected (primary) card's detail
 
     def test_plain_provider_has_no_account_suffix(self):
         tree = render(component="row", id="deepseek",
@@ -899,11 +906,15 @@ class WidgetAccountRenderTests(unittest.TestCase):
         tree = render(data=data)
         primary_logo = self._logos(render(component="row", id="anthropic", provider=self.PRIMARY))
         logos = self._logos(tree)
-        # The cherry-picker is closed in the harness's initial useState.
-        # Verify the two visible cards without claiming popup coverage.
-        self.assertEqual(len(logos), 2)
+        # CHANGED (multi-card feature): multi-row providers render as a card
+        # group (buttons + the selected row's card), so exactly one card — the
+        # selected first row — carries the provider logo and the second row
+        # stays visible as its own labelled button. The shared harness cannot
+        # click (its useState is initial-only); the click-through contract
+        # lives in tests/test_multicard_pane.py.
+        self.assertEqual(len(logos), 1)
         self.assertEqual(set(logos), set(primary_logo))
-        self.assertIn("Anthropic · Account 2", text(tree))
+        self.assertIn("Account 2", text(tree))
         self.assertNotIn("anthropic:account2", text(tree))
 
     def test_status_chip_for_account_matches_the_primary_chip(self):
@@ -985,7 +996,7 @@ class CliRenderTests(unittest.TestCase):
 
     def test_cli_status_shows_accounts_and_invalid_reason(self):
         _, rendered, _, _ = self._render(self._cache())
-        self.assertIn("anthropic · Work", rendered)
+        self.assertIn("Anthropic · Work", rendered)
         self.assertIn("config-invalid", rendered)
 
     def test_cli_shows_the_actionable_detail_for_an_unavailable_account(self):
@@ -1000,8 +1011,8 @@ class CliRenderTests(unittest.TestCase):
 
     def test_cli_filter_by_base_provider_lists_primary_and_accounts(self):
         _, _, _, by_provider = self._render(self._cache())
-        self.assertIn("anthropic · Work", by_provider)
-        self.assertIn("**anthropic**", by_provider)  # the primary row matches too
+        self.assertIn("Anthropic · Work", by_provider)
+        self.assertIn("**Anthropic**", by_provider)  # the primary row matches too
 
 
 if __name__ == "__main__":

@@ -17,7 +17,7 @@
 | `cursor` | `cursor-agent` login (macOS keychain or `auth.json`) | Read-only credential use; Included and API billing-cycle percents; personal on-demand cap as a window, personal/team pools as details. If the session expires, run `cursor-agent login`; the plugin never exchanges refresh tokens or writes to Cursor's credential store. |
 | `minimax` | Subscription Key **or** OAuth (`minimax-oauth`) | Token Plan 5h + Weekly windows per model; pay-as-you-go keys show `no-subscription`. Subscription Keys from both MiniMax platforms work: the CN hosts (`minimaxi.com`) are tried after the international ones when a host rejects the key as "invalid api key". The `video` model bucket is **opt-in** (default off — low tiers don't include video, so the entry reports a meaningless 100%). Enable with `hermes config set plugins.entries.quota.settings.minimaxVideoEnabled true` or `HERMES_QUOTA_MINIMAX_VIDEO_ENABLED=1`. |
 | `ollama` | `OLLAMA_API_KEY` (`sk-…`, from ollama.com/settings) | Ollama Cloud, from `GET /api/balance` (included allowance + balance, the reset period, purchased credit) and `GET /api/usage?range=30d` (spend, requests, tokens); `POST /api/me` supplies the plan label. The **Included credits** bar is the share drawn from the plan allowance, and the reset is the provider's own `period.until`. **Account balance** is the purchased wallet, which is separate money. See below. |
-| `grok` | Hermes `xai-oauth`, then opt-in browser cookies | Subscription window is `creditUsagePercent` only. Prepaid balance and on-demand usage are separate details, never the quota percentage. |
+| `grok` | Hermes `xai-oauth` bearer, then browser cookies | **Opt-in**, disabled by default. Reuses the Hermes xAI OAuth access token for the billing endpoint when present, then falls back to `grok_session.json`, Firefox, and Chromium-family cookies. Windows DPAPI/AES-GCM cookie decryption is supported; the xAI API exposes no plan or account name, so the card shows neither. |
 
 Each fetcher is **fail-open**: a broken provider shows `unavailable (<reason>)`
 and never blocks the rest.
@@ -183,38 +183,34 @@ or User-Agent, so the fetcher retries before reporting the provider unavailable.
 
 With one key, the windows are labelled plainly (`5-hour`, `Weekly`, `Monthly`). With several keys, each window carries its slot as `key N` so the rows stay distinguishable; environment variables are not treated as account identities.
 
-### Grok
+### Grok (opt-in)
 
-Grok subscription quota is read from the Hermes `xai-oauth` login. The request
-is `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits` with that
-access token. This is the Grok CLI billing surface, not the public xAI
-Management API and not an `xai` API key. The plugin does not refresh or write
-the token.
-
-The quota bar is `creditUsagePercent` against the included allowance. If that
-field is missing, usage is unavailable. On-demand usage and prepaid balance are
-never converted into the percentage. A zero prepaid balance is shown as `$0`;
-a non-zero money field stays in raw units because the unit is not a stable
-public contract.
-
-Browser cookies remain a last resort, and only when OAuth is missing or
-rejected and you opt in:
+Grok is **disabled by default**. When enabled, the provider first reuses the
+Hermes `xai-oauth` access token as a Bearer token against the Grok billing
+endpoint. The token is read-only and is never written or refreshed by this
+plugin. If Hermes xAI OAuth is unavailable, or the billing request rejects the
+Bearer credential with an authentication error, the provider keeps the
+existing cookie fallback chain:
 
 ```bash
 hermes config set plugins.entries.quota.settings.grokEnabled true
 hermes quota refresh
 ```
 
-When that opt-in is off, no cookies are read. A missing OAuth token then reports `no-credentials`.
-Cookie sources, in order:
+Credential sources, in order:
 
-1. `~/grok_session.json` if you created one yourself
-2. Firefox `grok.com` cookies
-3. Chromium / Google Chrome / Brave `grok.com` cookies (macOS and Linux)
+1. Hermes `xai-oauth` Bearer token
+2. `~/grok_session.json` if you created one yourself
+3. Firefox `grok.com` cookies
+4. Chromium / Google Chrome / Brave `grok.com` cookies
 
 Browser notes:
 
-- Sign into <https://grok.com> in the browser at least once.
+- Sign into <https://grok.com> in the browser at least once when using the
+  cookie fallback.
+- Windows reads Chromium's DPAPI-protected Local State AES key and decrypts
+  `v10`/`v11` cookies with AES-256-GCM. App-Bound `v20` cookies are reported as
+  unsupported (`chrome-app-bound`), never bypassed.
 - macOS reads the `Chrome Safe Storage` Keychain item (prompted on first
   refresh) and derives the AES key with 1003 PBKDF2 rounds.
 - Linux reads the login keyring with
@@ -226,6 +222,5 @@ Browser notes:
   **Hermes.app** (Desktop) and/or the Terminal you use for `hermes quota refresh`,
   then retry.
 - Chromium 127+ cookies prefix a SHA256(`host_key`) digest before the value; that
-  prefix is stripped after AES-CBC decrypt.
-- App-Bound `v20` cookies are not supported (`chrome-app-bound`).
+  prefix is stripped after decryption.
 - Safari is not supported.

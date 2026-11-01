@@ -6,12 +6,14 @@ No live browser profile, Keychain, or network is touched.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
 import sqlite3
 import sys
 import tempfile
+import types
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
@@ -37,6 +39,7 @@ _EXPIRED_EXPIRES = 1
 
 _IS_DARWIN = sys.platform == "darwin"
 _IS_LINUX = sys.platform.startswith("linux")
+_IS_WINDOWS = sys.platform == "win32"
 
 
 @contextmanager
@@ -180,6 +183,19 @@ class ChromeDecryptTests(unittest.TestCase):
         key = _pbkdf2_key(_TEST_PASSWORD.encode("utf-8"))
         blob = _encrypt_v10(key, "s3cret-value")
         self.assertEqual(decrypt_chrome_cookie_value(key, blob), "s3cret-value")
+
+    def test_decrypts_windows_v10_and_v11_gcm(self):
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        from quota_providers.browser_cookies import decrypt_chrome_cookie_value
+
+        key = b"k" * 32
+        nonce = b"n" * 12
+        plaintext = b"s3cret-value"
+        encrypted = AESGCM(key).encrypt(nonce, plaintext, None)
+        for prefix in (b"v10", b"v11"):
+            with self.subTest(prefix=prefix):
+                blob = prefix + nonce + encrypted
+                self.assertEqual(decrypt_chrome_cookie_value(key, blob), "s3cret-value")
 
     def test_rejects_v20_prefix(self):
         from quota_providers.browser_cookies import ChromeCookieError, decrypt_chrome_cookie_value
@@ -465,6 +481,52 @@ class ChromeLinuxKeyringTests(unittest.TestCase):
         self.assertNotIn("nope", header)
 
 
+class ChromeWindowsTests(unittest.TestCase):
+    def test_windows_dpapi_key_derivation_reads_local_state(self):
+        from quota_providers import browser_cookies as bc
+
+        key = b"k" * 32
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Chrome" / "User Data"
+            db = root / "Default" / "Network" / "Cookies"
+            db.parent.mkdir(parents=True)
+            local_state = root / "Local State"
+            local_state.write_text(
+                json.dumps(
+                    {"os_crypt": {"encrypted_key": base64.b64encode(b"DPAPIwrapped").decode()}}
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.object(bc.sys, "platform", "win32"), mock.patch.object(
+                bc, "_dpapi_unprotect", return_value=key
+            ) as unprotect:
+                derived = bc._windows_dpapi_aes_key(db)
+        self.assertEqual(derived, key)
+        unprotect.assert_called_once_with(b"wrapped")
+
+    @unittest.skipUnless(_HAS_CRYPTO, "cryptography is required for Windows cookie tests")
+    def test_windows_loader_decrypts_gcm_cookie(self):
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        from quota_providers import browser_cookies as bc
+
+        key = b"k" * 32
+        nonce = b"n" * 12
+        blob = b"v10" + nonce + AESGCM(key).encrypt(nonce, b"alpha", None)
+        with self._db() as db:
+            _write_cookies_db(
+                db,
+                [(".grok.com", "sso", blob, _FUTURE_EXPIRES)],
+            )
+            with mock.patch.object(bc.sys, "platform", "win32"), mock.patch.object(
+                bc, "chrome_cookie_dbs", return_value=[db]
+            ), mock.patch.object(bc, "_windows_dpapi_aes_key", return_value=key):
+                header = bc.load_chrome_grok_cookies()
+        self.assertEqual(header, "sso=alpha")
+
+    def _db(self):
+        return _temp_cookies_db()
+
+
 class GrokChromeWireTests(unittest.TestCase):
     def test_fetch_maps_tcc_to_unavailable(self):
         from quota_providers import grok
@@ -476,7 +538,7 @@ class GrokChromeWireTests(unittest.TestCase):
             grok,
             "load_chrome_grok_cookies",
             side_effect=ChromeCookieError("chrome-tcc-denied"),
-        ):
+        ), mock.patch.object(grok, "_hermes_xai_access_token", return_value=None):
             res = grok.fetch_grok_quota()
         self.assertEqual(res.unavailable_reason, "chrome-tcc-denied")
         self.assertEqual(res.windows, [])
@@ -491,6 +553,110 @@ class GrokChromeWireTests(unittest.TestCase):
         ):
             cookies = grok._load_cookies()
         self.assertEqual(cookies, "ff=1")
+
+    def test_token_from_auth_json_reads_provider_state(self):
+        from quota_providers import grok
+
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as fh:
+            json.dump(
+                {"providers": {"xai-oauth": {"tokens": {"access_token": "provider-token"}}}},
+                fh,
+            )
+            path = fh.name
+        try:
+            self.assertEqual(grok._token_from_auth_json(path), "provider-token")
+        finally:
+            os.unlink(path)
+
+    def test_token_from_auth_json_reads_credential_pool(self):
+        from quota_providers import grok
+
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as fh:
+            json.dump(
+                {"credential_pool": {"xai-oauth": [{"access_token": "pool-token"}]}},
+                fh,
+            )
+            path = fh.name
+        try:
+            self.assertEqual(grok._token_from_auth_json(path), "pool-token")
+        finally:
+            os.unlink(path)
+
+    def test_hermes_xai_access_token_falls_back_to_legacy_reader(self):
+        from quota_providers import grok
+
+        auth_xai = types.ModuleType("hermes_cli.auth_xai")
+        auth_xai._read_xai_oauth_tokens = mock.Mock(side_effect=RuntimeError("unavailable"))
+        auth = types.ModuleType("hermes_cli.auth")
+        auth._read_xai_oauth_tokens = mock.Mock(
+            return_value={"tokens": {"access_token": "legacy-token"}}
+        )
+        with mock.patch.dict(
+            sys.modules,
+            {"hermes_cli.auth_xai": auth_xai, "hermes_cli.auth": auth},
+        ):
+            self.assertEqual(grok._hermes_xai_access_token(), "legacy-token")
+        auth_xai._read_xai_oauth_tokens.assert_called_once_with()
+        auth._read_xai_oauth_tokens.assert_called_once_with()
+
+    def test_hermes_xai_access_token_falls_back_to_auth_json(self):
+        from quota_providers import grok
+
+        auth_xai = types.ModuleType("hermes_cli.auth_xai")
+        auth_xai._read_xai_oauth_tokens = mock.Mock(side_effect=RuntimeError("unavailable"))
+        auth = types.ModuleType("hermes_cli.auth")
+        auth._read_xai_oauth_tokens = mock.Mock(side_effect=RuntimeError("unavailable"))
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {"HERMES_HOME": tmp}, clear=False
+        ), mock.patch.dict(
+            sys.modules,
+            {"hermes_cli.auth_xai": auth_xai, "hermes_cli.auth": auth},
+        ):
+            Path(tmp, "auth.json").write_text(
+                json.dumps(
+                    {"providers": {"xai-oauth": {"tokens": {"access_token": "file-token"}}}}
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(grok._hermes_xai_access_token(), "file-token")
+
+    def test_fetch_grok_grpc_sets_bearer_header(self):
+        from quota_providers import grok
+
+        captured = {}
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = b""
+
+        def opener(req, timeout=None):  # noqa: ANN001, ARG001
+            captured["request"] = req
+            return response
+
+        with mock.patch.object(grok, "urlopen_no_redirect", opener):
+            grok._fetch_grok_grpc(grok._grok_grpc_headers(bearer="header-token"))
+        self.assertEqual(captured["request"].get_header("Authorization"), "Bearer header-token")
+
+    def test_oauth_primary_then_cookie_fallback_on_auth_failure(self):
+        from quota_providers import grok
+        from quota_providers.base import QuotaResult
+
+        auth_failure = QuotaResult(label="grok", unavailable_reason="auth-failed")
+        cookie_result = QuotaResult(label="grok")
+        with mock.patch.object(grok, "_hermes_xai_access_token", return_value="oauth-token"), mock.patch.object(
+            grok, "_load_cookies", return_value="ff=1"
+        ), mock.patch.object(
+            grok, "_fetch_grok_grpc", side_effect=[auth_failure, cookie_result]
+        ) as fetch_grpc, mock.patch.object(grok, "_fetch_grok_rest") as fetch_rest:
+            result = grok.fetch_grok_quota()
+
+        self.assertIs(result, cookie_result)
+        self.assertEqual(fetch_grpc.call_count, 2)
+        oauth_headers = fetch_grpc.call_args_list[0].args[0]
+        cookie_headers = fetch_grpc.call_args_list[1].args[0]
+        self.assertEqual(oauth_headers["Authorization"], "Bearer oauth-token")
+        self.assertNotIn("cookie", oauth_headers)
+        self.assertEqual(cookie_headers["cookie"], "ff=1")
+        fetch_rest.assert_not_called()
 
 
 if __name__ == "__main__":

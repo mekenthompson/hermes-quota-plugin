@@ -122,6 +122,7 @@ class OpenRouterTests(unittest.TestCase):
         result, calls = self.fetch(get)
         self.assertIsNone(result.unavailable_reason)
         self.assertEqual([w.used_percent for w in result.windows], [60, 80])
+        self.assertEqual([(b.currency, b.total_balance) for b in result.account_balances], [('USD', '8')])
         self.assertEqual([w.label for w in result.windows], ["Key 1 (native) quota", "Key 2 (saved) quota"])
         wallets = [c for c in calls.call_args_list if c.args[0].endswith("/credits")]
         self.assertEqual(len(wallets), 1)

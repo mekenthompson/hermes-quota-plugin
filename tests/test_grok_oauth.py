@@ -10,7 +10,7 @@ import types
 import unittest
 from unittest import mock
 
-from quota_providers import grok
+from quota_providers import grok_cli as grok
 
 
 _TOKEN = "fake-xai-oauth-token"
@@ -166,6 +166,7 @@ class GrokOAuthTests(unittest.TestCase):
 
         self.assertEqual([window.used_percent for window in result.windows], [14.0])
         self.assertEqual(result.windows[0].label, "Weekly pool")
+        self.assertEqual(result.windows[0].duration_seconds, 604800)
         self.assertEqual(result.plan, "SuperGrok")
         self.assertIn("Pay-as-you-go: off", result.details)
         self.assertIn("Prepaid balance: $0", result.details)
@@ -183,6 +184,12 @@ class GrokOAuthTests(unittest.TestCase):
         self.assertEqual(result.windows, [])
         self.assertEqual(result.unavailable_reason, "subscription-usage-unavailable")
         self.assertIn("Pay-as-you-go: on (cap 100 raw units, used 80 raw units)", result.details)
+
+    def test_registry_selects_cli_subscription_route(self):
+        from quota_providers import PROVIDER_FETCHERS
+        expected = grok.QuotaResult(label='grok', windows=[grok.QuotaWindow(label='Weekly pool', used_percent=3)])
+        with mock.patch.object(grok, '_fetch_grok_oauth', return_value=expected):
+            self.assertIs(PROVIDER_FETCHERS['grok'](), expected)
 
     def test_registered_path_uses_oauth_without_enabling_cookies(self):
         oauth = grok.QuotaResult(label="grok", windows=[grok.QuotaWindow(label="Weekly pool", used_percent=3)])

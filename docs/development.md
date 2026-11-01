@@ -5,6 +5,8 @@ bash -n install.sh uninstall.sh
 python -m py_compile __init__.py commands.py quota_cache.py quota_providers/*.py
 python -m unittest discover -s tests -p "test_*.py"
 node --check desktop/plugin.js
+node --check tui/quota-panel.mjs
+node --test tests/tui-panel.test.mjs
 python scripts/scan_plugin.py
 hermes plugins doctor quota
 hermes quota refresh

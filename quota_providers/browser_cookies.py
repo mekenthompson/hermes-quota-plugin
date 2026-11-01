@@ -7,6 +7,7 @@ leave this process.
 """
 from __future__ import annotations
 
+import base64
 import glob
 import hashlib
 import json
@@ -148,10 +149,19 @@ def _linux_config_home() -> Path:
 def _chrome_user_data_roots() -> list[Path]:
     """Existing browser user-data roots on this platform.
 
-    macOS reads the Keychain and Linux the login keyring (secret-tool), so both
-    are supported; Windows is not (DPAPI key).
+    macOS reads the Keychain, Linux the login keyring, and Windows derives
+    the AES key from the current user's DPAPI-protected Local State key.
     """
-    if sys.platform == "darwin":
+    if sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA")
+        if not local:
+            return []
+        candidates = [
+            Path(local) / "BraveSoftware" / "Brave-Browser" / "User Data",
+            Path(local) / "Google" / "Chrome" / "User Data",
+            Path(local) / "Chromium" / "User Data",
+        ]
+    elif sys.platform == "darwin":
         candidates = [Path.home() / "Library" / "Application Support" / "Google" / "Chrome"]
     elif sys.platform.startswith("linux"):
         config = _linux_config_home()
@@ -373,22 +383,92 @@ def _derive_chrome_key(password: str) -> bytes:
     ).derive(password.encode("utf-8"))
 
 
-def _chrome_aes_keys(app: str = "chrome") -> list[bytes]:
+def _dpapi_unprotect(data: bytes) -> bytes:
+    """Decrypt a Chromium DPAPI blob for the current Windows user."""
+    import ctypes
+    from ctypes import wintypes
+
+    class DATA_BLOB(ctypes.Structure):
+        _fields_ = [
+            ("cbData", wintypes.DWORD),
+            ("pbData", ctypes.POINTER(ctypes.c_char)),
+        ]
+
+    in_buf = ctypes.create_string_buffer(data, len(data))
+    blob_in = DATA_BLOB(len(data), ctypes.cast(in_buf, ctypes.POINTER(ctypes.c_char)))
+    blob_out = DATA_BLOB()
+    crypt32 = ctypes.windll.crypt32
+    kernel32 = ctypes.windll.kernel32
+    if not crypt32.CryptUnprotectData(
+        ctypes.byref(blob_in), None, None, None, None, 0, ctypes.byref(blob_out)
+    ):
+        raise ChromeCookieError("chrome-dpapi-denied")
+    try:
+        return ctypes.string_at(blob_out.pbData, blob_out.cbData)
+    finally:
+        if blob_out.pbData:
+            kernel32.LocalFree(blob_out.pbData)
+
+
+def _local_state_for_cookie_db(source: Optional[Path]) -> Optional[Path]:
+    """Find Chromium's Local State file for a Cookies SQLite path."""
+    if source is None:
+        return None
+    parent = source
+    for _ in range(3):
+        parent = parent.parent
+        candidate = parent / "Local State"
+        try:
+            if candidate.is_file():
+                return candidate
+        except OSError as exc:
+            if _is_tcc_error(exc):
+                _raise_chrome_tcc()
+    return None
+
+
+def _windows_dpapi_aes_key(cookie_db: Optional[Path]) -> bytes:
+    """Read and DPAPI-unprotect Chromium's Local State AES key."""
+    if sys.platform != "win32":
+        raise ChromeCookieError("chrome-dpapi-denied")
+    path = _local_state_for_cookie_db(cookie_db)
+    if path is None:
+        raise ChromeCookieError("chrome-dpapi-denied")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        encrypted_key = (data.get("os_crypt") or {}).get("encrypted_key")
+        raw = base64.b64decode(encrypted_key) if isinstance(encrypted_key, str) else b""
+        if raw.startswith(b"DPAPI"):
+            raw = raw[5:]
+        key = _dpapi_unprotect(raw)
+        if not key:
+            raise ValueError("empty DPAPI key")
+        return key
+    except ChromeCookieError:
+        raise
+    except Exception as exc:
+        raise ChromeCookieError("chrome-dpapi-denied") from exc
+
+
+def _chrome_aes_keys(app: str = "chrome", cookie_db: Optional[Path] = None) -> list[bytes]:
     """Candidate AES keys for one browser's cookie DB, best guess first."""
     keys: list[bytes] = []
-    password = _chrome_safe_storage_password(app)
-    if password:
-        keys.append(_derive_chrome_key(password))
-    if sys.platform.startswith("linux"):
-        keys.append(_derive_chrome_key(_LINUX_FALLBACK_PASSWORD))
+    if sys.platform == "win32":
+        keys.append(_windows_dpapi_aes_key(cookie_db))
+    else:
+        password = _chrome_safe_storage_password(app)
+        if password:
+            keys.append(_derive_chrome_key(password))
+        if sys.platform.startswith("linux"):
+            keys.append(_derive_chrome_key(_LINUX_FALLBACK_PASSWORD))
     if not keys:
         raise ChromeCookieError("chrome-keychain-denied")
     return keys
 
 
-def _chrome_aes_key() -> bytes:
-    """Single-key form (macOS Keychain path)."""
-    return _chrome_aes_keys("chrome")[0]
+def _chrome_aes_key(cookie_db: Optional[Path] = None) -> bytes:
+    """Single-key form retained for callers and tests."""
+    return _chrome_aes_keys("chrome", cookie_db)[0]
 
 
 def _strip_chrome_host_hash(plaintext: bytes, host_key: Optional[str] = None) -> bytes:
@@ -411,6 +491,25 @@ def _strip_chrome_host_hash(plaintext: bytes, host_key: Optional[str] = None) ->
             return plaintext
 
 
+def _decrypt_aes_gcm(key: bytes, payload: bytes, host_key: Optional[str] = None) -> str:
+    """Decrypt Windows Chromium ``v10``/``v11`` cookies (AES-256-GCM)."""
+    if len(payload) < 28:
+        raise ChromeCookieError("chrome-decrypt-failed")
+    nonce, rest = payload[:12], payload[12:]
+    ciphertext, tag = rest[:-16], rest[-16:]
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    try:
+        plaintext = AESGCM(key).decrypt(nonce, ciphertext + tag, None)
+    except Exception as exc:
+        raise ChromeCookieError("chrome-decrypt-failed") from exc
+    plaintext = _strip_chrome_host_hash(plaintext, host_key)
+    try:
+        return plaintext.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ChromeCookieError("chrome-decrypt-failed") from exc
+
+
 def decrypt_chrome_cookie_value(
     key: bytes, blob: bytes, host_key: Optional[str] = None
 ) -> str:
@@ -427,6 +526,8 @@ def decrypt_chrome_cookie_value(
     if not blob.startswith((b"v10", b"v11")):
         raise ChromeCookieError("chrome-unknown-prefix")
     ciphertext = blob[3:]
+    if len(key) == 32:
+        return _decrypt_aes_gcm(key, ciphertext, host_key)
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
     decryptor = Cipher(algorithms.AES(key), modes.CBC(_CHROME_CBC_IV)).decryptor()
@@ -473,10 +574,10 @@ def _chrome_app_for_path(path: Path) -> str:
 def load_chrome_grok_cookies() -> Optional[str]:
     """Cookie header for grok.com from a local browser profile, or None.
 
-    macOS reads the Keychain, Linux the login keyring (secret-tool); Windows is
-    unsupported (DPAPI).
+    macOS reads the Keychain, Linux the login keyring, and Windows the
+    current user's DPAPI-protected key.
     """
-    if sys.platform != "darwin" and not sys.platform.startswith("linux"):
+    if sys.platform not in {"darwin", "win32"} and not sys.platform.startswith("linux"):
         return None
     try:
         sources = chrome_cookie_dbs()
@@ -528,7 +629,7 @@ def load_chrome_grok_cookies() -> Optional[str]:
             if keys is None:
                 # Resolved lazily: a profile with no grok cookies must not fail
                 # just because no keyring secret is available.
-                keys = _chrome_aes_keys(app)
+                keys = _chrome_aes_keys(app, source)
                 keys_by_app[app] = keys
             value: Optional[str] = None
             for candidate in keys:

@@ -185,6 +185,49 @@ class GrokOAuthTests(unittest.TestCase):
         self.assertEqual(result.unavailable_reason, "subscription-usage-unavailable")
         self.assertIn("Pay-as-you-go: on (cap 100 raw units, used 80 raw units)", result.details)
 
+    def test_fresh_period_with_omitted_zero_percent_reads_as_zero(self):
+        # Live xAI response just after a weekly reset: proto3 JSON drops the
+        # zero creditUsagePercent and the empty productUsage list.
+        payload = {"config": {
+            "currentPeriod": {"type": "USAGE_PERIOD_TYPE_WEEKLY",
+                              "start": "2026-11-22T22:19:12.154+00:00",
+                              "end": "2026-11-29T22:19:12.154+00:00"},
+            "isUnifiedBillingUser": True,
+            "prepaidBalance": {"val": 0},
+        }}
+
+        def opener(request, timeout):
+            del timeout
+            if request.full_url.endswith("/v1/settings"):
+                return _Response({"subscription_tier_display": "SuperGrok"})
+            return _Response(payload)
+
+        with mock.patch.object(grok, "urlopen_no_redirect", opener):
+            result = grok._oauth_account(_TOKEN, 1)
+
+        self.assertIsNone(result.unavailable_reason)
+        self.assertEqual([window.used_percent for window in result.windows], [0.0])
+        self.assertEqual(result.windows[0].label, "Weekly pool")
+        self.assertEqual(result.windows[0].reset_at, "2026-11-29T22:19:12.154+00:00")
+
+    def test_omitted_percent_with_product_usage_stays_unavailable(self):
+        payload = {"config": {
+            "currentPeriod": {"type": "USAGE_PERIOD_TYPE_WEEKLY",
+                              "end": "2026-11-29T22:19:12.154+00:00"},
+            "productUsage": [{"product": "GrokChat", "usagePercent": 3}],
+        }}
+        with mock.patch.object(grok, "urlopen_no_redirect", lambda *_a, **_k: _Response(payload)):
+            result = grok._oauth_account(_TOKEN, 1)
+        self.assertEqual(result.windows, [])
+        self.assertEqual(result.unavailable_reason, "subscription-usage-unavailable")
+
+    def test_omitted_percent_without_period_stays_unavailable(self):
+        payload = {"config": {"prepaidBalance": {"val": 0}}}
+        with mock.patch.object(grok, "urlopen_no_redirect", lambda *_a, **_k: _Response(payload)):
+            result = grok._oauth_account(_TOKEN, 1)
+        self.assertEqual(result.windows, [])
+        self.assertEqual(result.unavailable_reason, "subscription-usage-unavailable")
+
     def test_registry_selects_cli_subscription_route(self):
         from quota_providers import PROVIDER_FETCHERS
         expected = grok.QuotaResult(label='grok', windows=[grok.QuotaWindow(label='Weekly pool', used_percent=3)])

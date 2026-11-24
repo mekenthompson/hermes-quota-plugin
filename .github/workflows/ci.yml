@@ -9,7 +9,9 @@ on:
 jobs:
   python-tests:
     name: Python tests (${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    # ubuntu-latest moved to 26.04, whose toolcache has no Python 3.9.
+    # Pin the image so the supported 3.9 floor keeps real coverage.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:

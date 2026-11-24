@@ -129,8 +129,16 @@ def _oauth_account(token, index):
     period = period if isinstance(period, dict) else {}
     weekly = 'WEEKLY' in str(period.get('type') or '').upper()
     used = _finite(config.get('creditUsagePercent'))
+    products = config.get('productUsage')
+    # xAI serves proto3 JSON, which omits zero-valued fields. Right after a
+    # period reset both creditUsagePercent and productUsage vanish. Only read
+    # that as 0% when the key is absent (not malformed), a current period with
+    # an end is present, and no product reports usage.
+    if ('creditUsagePercent' not in config and isinstance(period.get('end'), str)
+            and period.get('type') and not products):
+        used = 0.0
     details = []
-    for product in config.get('productUsage') if isinstance(config.get('productUsage'), list) else []:
+    for product in products if isinstance(products, list) else []:
         if not isinstance(product, dict): continue
         percent = _finite(product.get('usagePercent'))
         name = {'GrokBuild': 'Grok Build', 'GrokChat': 'Grok Chat'}.get(product.get('product'), 'Other product')
